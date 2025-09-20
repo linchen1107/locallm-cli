@@ -1,0 +1,12 @@
+# Manifest file for including additional files in the package
+include README.md
+include requirements.txt
+include LICENSE
+recursive-include docs *.md
+recursive-include scripts *.bat *.ps1 *.py
+recursive-include src *.py
+recursive-include tests *.py
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .git*
+recursive-exclude * .DS_Store

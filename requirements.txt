@@ -1,0 +1,4 @@
+# LocalLM CLI 依賴套件
+httpx>=0.25.0
+rich>=13.0.0
+pyfiglet>=0.8.0

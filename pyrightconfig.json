@@ -1,0 +1,19 @@
+{
+    "include": [
+        "src/**/*.py"
+    ],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "dist",
+        "build"
+    ],
+    "extraPaths": [
+        "./src"
+    ],
+    "pythonVersion": "3.8",
+    "typeCheckingMode": "basic",
+    "useLibraryCodeForTypes": true,
+    "autoSearchPaths": true,
+    "stubPath": "./typings"
+}
