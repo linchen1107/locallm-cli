@@ -1,23 +1,32 @@
 {
     "folders": [
         {
-            "name": "LocalLM CLI",
             "path": "."
         }
     ],
     "settings": {
         "python.analysis.extraPaths": [
-            "./src"
+            "./src",
+            "${workspaceFolder}/src"
         ],
         "python.analysis.autoSearchPaths": true,
-        "python.analysis.diagnosticMode": "workspace",
-        "python.analysis.typeCheckingMode": "basic"
+        "python.analysis.typeCheckingMode": "basic",
+        "python.analysis.autoImportCompletions": true,
+        "python.analysis.include": [
+            "src/**",
+            "*.py"
+        ],
+        "python.analysis.exclude": [
+            "**/__pycache__",
+            "build",
+            "dist"
+        ],
+        "python.defaultInterpreterPath": "python"
     },
     "extensions": {
         "recommendations": [
             "ms-python.python",
-            "ms-python.pylance",
-            "ms-python.black-formatter"
+            "ms-python.vscode-pylance"
         ]
     }
 }

@@ -1,6 +1,7 @@
 {
     "python.analysis.extraPaths": [
-        "./src"
+        "./src",
+        "${workspaceFolder}/src"
     ],
     "python.defaultInterpreterPath": "python",
     "python.analysis.autoImportCompletions": true,
@@ -11,6 +12,16 @@
     "python.linting.pylintEnabled": false,
     "python.linting.flake8Enabled": true,
     "python.formatting.provider": "black",
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.include": [
+        "src/**"
+    ],
+    "python.analysis.exclude": [
+        "**/__pycache__",
+        "**/*.pyc",
+        "build",
+        "dist"
+    ],
     "files.exclude": {
         "**/__pycache__": true,
         "**/*.pyc": true

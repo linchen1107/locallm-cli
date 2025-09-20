@@ -11,7 +11,7 @@
 
 1. **Clone 專案**
    ```bash
-   git clone <repository-url>
+   git clone <https://github.com/linchen1107/locallm-cli.git>
    cd locallm-cli
    ```
 

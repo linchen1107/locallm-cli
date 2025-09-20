@@ -10,7 +10,8 @@ from .file_tools import (
     edit_file,
     file_exists,
     list_files,
-    get_current_path
+    get_current_path,
+    read_pdf
 )
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     'edit_file',
     'file_exists',
     'list_files',
-    'get_current_path'
+    'get_current_path',
+    'read_pdf'
 ]

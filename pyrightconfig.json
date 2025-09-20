@@ -1,19 +1,29 @@
 {
     "include": [
-        "src/**/*.py"
+        "src/**/*.py",
+        "*.py"
     ],
     "exclude": [
         "**/node_modules",
         "**/__pycache__",
         "dist",
-        "build"
+        "build",
+        ".git"
     ],
     "extraPaths": [
-        "./src"
+        "./src",
+        "src"
     ],
     "pythonVersion": "3.8",
     "typeCheckingMode": "basic",
     "useLibraryCodeForTypes": true,
     "autoSearchPaths": true,
-    "stubPath": "./typings"
+    "stubPath": "./typings",
+    "reportMissingImports": "warning",
+    "reportOptionalSubscript": "none",
+    "reportOptionalMemberAccess": "none",
+    "reportOptionalCall": "none",
+    "reportOptionalIterable": "none",
+    "reportOptionalContextManager": "none",
+    "reportOptionalOperand": "none"
 }

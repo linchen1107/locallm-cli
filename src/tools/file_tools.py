@@ -7,6 +7,13 @@ import os
 from pathlib import Path
 from typing import Optional
 
+# PDF 相關導入（可選依賴）
+try:
+    import fitz  # PyMuPDF
+    HAS_PDF_SUPPORT = True
+except ImportError:
+    HAS_PDF_SUPPORT = False
+
 
 class FileTools:
     """檔案操作工具類"""
@@ -79,6 +86,103 @@ class FileTools:
                 with open(resolved_path, 'r', encoding='latin-1') as f:
                     content = f.read()
                 return content
+
+    def read_pdf(self, file_path: str, use_ocr: bool = False) -> str:
+        """
+        讀取 PDF 檔案內容並提取文字
+        
+        Args:
+            file_path: PDF 檔案路徑
+            use_ocr: 是否強制使用 OCR（適用於掃描型 PDF）
+            
+        Returns:
+            str: 提取的文字內容
+            
+        Raises:
+            FileNotFoundError: 檔案不存在
+            ValueError: 不是 PDF 檔案或 PDF 讀取失敗
+            ImportError: PyMuPDF 未安裝
+        """
+        if not HAS_PDF_SUPPORT:
+            raise ImportError("PDF 支援需要安裝 PyMuPDF。請執行: pip install pymupdf")
+        
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if not resolved_path.is_file():
+            raise ValueError(f"路徑不是檔案: {resolved_path}")
+        
+        if resolved_path.suffix.lower() != '.pdf':
+            raise ValueError(f"檔案不是 PDF 格式: {resolved_path}")
+        
+        try:
+            # 使用 PyMuPDF 讀取 PDF
+            pdf_document = fitz.open(str(resolved_path))
+            text_content = ""
+            low_text_pages = []  # 記錄文字內容較少的頁面
+            
+            # 逐頁提取文字
+            for page_num in range(pdf_document.page_count):
+                page = pdf_document[page_num]
+                page_header = f"--- 第 {page_num + 1} 頁 ---\n"
+                
+                # 使用 get_text() 方法提取文字
+                page_text = getattr(page, 'get_text', lambda: "")()
+                
+                # 檢查文字內容是否充足
+                if len(page_text.strip()) < 50:  # 文字內容較少，可能需要 OCR
+                    low_text_pages.append(page_num)
+                
+                if use_ocr or (len(page_text.strip()) < 50):
+                    # 嘗試使用 OCR
+                    ocr_text = self._try_ocr_on_page(str(resolved_path), page_num)
+                    if ocr_text and len(ocr_text.strip()) > len(page_text.strip()):
+                        page_text = ocr_text
+                        page_header += "[OCR] "
+                
+                text_content += page_header + page_text + "\n\n"
+            
+            pdf_document.close()
+            
+            # 如果整體文字內容很少，提示可能需要 OCR
+            if not text_content.strip() or len(text_content.strip()) < 100:
+                if low_text_pages:
+                    ocr_hint = f"\n\n（注意：第 {', '.join(str(p+1) for p in low_text_pages)} 頁文字內容較少，"
+                    ocr_hint += "可能是掃描型 PDF，建議使用 OCR 功能提取文字）"
+                    text_content += ocr_hint
+                else:
+                    text_content = "（此 PDF 文件沒有可提取的文字內容，可能是圖片格式的 PDF，建議使用 OCR 功能）"
+            
+            return text_content.strip()
+            
+        except Exception as e:
+            raise ValueError(f"PDF 讀取失敗: {e}")
+    
+    def _try_ocr_on_page(self, pdf_path: str, page_num: int) -> str:
+        """
+        嘗試對 PDF 頁面使用 OCR
+        
+        Args:
+            pdf_path: PDF 檔案路徑
+            page_num: 頁面編號
+            
+        Returns:
+            str: OCR 提取的文字，失敗則返回空字串
+        """
+        try:
+            from .ocr_tools import create_ocr_processor
+            
+            ocr_processor = create_ocr_processor()
+            if ocr_processor:
+                return ocr_processor.extract_text_from_pdf_page(pdf_path, page_num)
+        except ImportError:
+            pass  # OCR 不可用，靜默忽略
+        except Exception:
+            pass  # OCR 失敗，靜默忽略
+        
+        return ""
     
     def write_file(self, file_path: str, content: str) -> None:
         """
@@ -209,3 +313,7 @@ def list_files(directory: str = ".", pattern: str = "*") -> list:
 def get_current_path() -> str:
     """取得目前工作路徑"""
     return default_file_tools.get_current_path()
+
+def read_pdf(file_path: str, use_ocr: bool = False) -> str:
+    """讀取 PDF 檔案內容"""
+    return default_file_tools.read_pdf(file_path, use_ocr)

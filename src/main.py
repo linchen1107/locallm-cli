@@ -7,6 +7,7 @@ LocalLM CLI - 本地模型驅動的檔案操作命令行工具
 import sys
 import os
 import re
+import json
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -39,7 +40,7 @@ class LocalLMCLI:
             previous_row = current_row
         return previous_row[-1]
     
-    def __init__(self, default_model: str = "llama3.2"):
+    def __init__(self, default_model: str = "qwen3:8b"):
         """
         初始化 CLI
         
@@ -50,6 +51,21 @@ class LocalLMCLI:
         self.conversation_history: List[Dict] = []
         self.running = True
         self.exit_count = 0  # 用於處理雙重 Ctrl+C 退出
+        
+        # 工作區目錄管理
+        self.workspace_config_file = Path.home() / ".locallm" / "workspaces.json"
+        self.workspace_directories = self._load_workspace_directories()
+        
+        # 檢查點系統
+        self.checkpoints_dir = Path.home() / ".locallm" / "checkpoints"
+        self.checkpoints_file = Path.home() / ".locallm" / "checkpoints.json"
+        self.checkpointing_enabled = True  # 可透過設定控制
+        self._init_checkpoint_system()
+        
+        # 儲存的聊天模型管理
+        self.saved_models_dir = Path.home() / ".locallm" / "saved_models"
+        self.saved_models_file = Path.home() / ".locallm" / "saved_models.json"
+        self._init_saved_models_system()
         
     def print_banner(self):
         """顯示程式橫幅"""
@@ -129,8 +145,9 @@ class LocalLMCLI:
         print()
         
         # 簡潔的使用提示
-        print("  Commands: /read /write /edit /create /list /models /switch /help /exit")
+        print("  Commands: /read /write /edit /create /list /tree /patch /clear /bye /load /dir /restore /save /saved /init /models /switch /help /exit")
         print("  或直接對話提問，例如: '請撰寫一個 hello.txt'")
+        print("  快捷鍵: Ctrl+D 清除對話歷史")
         print()
     
     def parse_command(self, input_text: str) -> tuple:
@@ -165,6 +182,206 @@ class LocalLMCLI:
         
         return (command, args)
     
+    def _load_workspace_directories(self) -> List[str]:
+        """載入工作區目錄列表"""
+        try:
+            if self.workspace_config_file.exists():
+                with open(self.workspace_config_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return data.get('directories', [])
+        except (json.JSONDecodeError, FileNotFoundError, PermissionError) as e:
+            # 如果無法讀取檔案，返回空列表
+            pass
+        return []
+    
+    def _save_workspace_directories(self) -> None:
+        """儲存工作區目錄列表"""
+        try:
+            # 確保配置目錄存在
+            self.workspace_config_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            data = {
+                'directories': self.workspace_directories,
+                'last_updated': str(Path().cwd())  # 記錄最後更新時的目錄
+            }
+            
+            with open(self.workspace_config_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except (PermissionError, OSError) as e:
+            print(f"  ⚠ Cannot save workspace config: {e}")
+    
+    def _resolve_path(self, path_str: str) -> Optional[Path]:
+        """解析路徑，支援絕對路徑、相對路徑和家目錄參照"""
+        try:
+            path_str = path_str.strip()
+            
+            # 處理家目錄參照
+            if path_str.startswith('~'):
+                path = Path(path_str).expanduser()
+            # 處理絕對路徑
+            elif Path(path_str).is_absolute():
+                path = Path(path_str)
+            # 處理相對路徑
+            else:
+                path = Path.cwd() / path_str
+            
+            # 解析為絕對路徑
+            path = path.resolve()
+            
+            return path
+        except (OSError, ValueError) as e:
+            return None
+    
+    def _init_checkpoint_system(self) -> None:
+        """初始化檢查點系統"""
+        try:
+            # 確保檢查點目錄存在
+            self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 如果檢查點檔案不存在，創建空的
+            if not self.checkpoints_file.exists():
+                self._save_checkpoints_index({})
+        except (PermissionError, OSError) as e:
+            print(f"  ⚠ Cannot initialize checkpoint system: {e}")
+            self.checkpointing_enabled = False
+    
+    def _load_checkpoints_index(self) -> Dict:
+        """載入檢查點索引"""
+        try:
+            if self.checkpoints_file.exists():
+                with open(self.checkpoints_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError, PermissionError) as e:
+            pass
+        return {}
+    
+    def _save_checkpoints_index(self, checkpoints: Dict) -> None:
+        """儲存檢查點索引"""
+        try:
+            with open(self.checkpoints_file, 'w', encoding='utf-8') as f:
+                json.dump(checkpoints, f, indent=2, ensure_ascii=False)
+        except (PermissionError, OSError) as e:
+            print(f"  ⚠ Cannot save checkpoints index: {e}")
+    
+    def _create_checkpoint(self, operation_type: str, files_affected: List[str]) -> Optional[str]:
+        """創建檢查點"""
+        if not self.checkpointing_enabled:
+            return None
+        
+        try:
+            from datetime import datetime
+            import uuid
+            import shutil
+            
+            # 生成唯一的檢查點 ID
+            checkpoint_id = str(uuid.uuid4())[:8]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 創建檢查點目錄
+            checkpoint_dir = self.checkpoints_dir / f"{timestamp}_{checkpoint_id}"
+            checkpoint_dir.mkdir(exist_ok=True)
+            
+            # 備份影響的檔案
+            backed_up_files = []
+            for file_path in files_affected:
+                if Path(file_path).exists():
+                    file_name = Path(file_path).name
+                    backup_file = checkpoint_dir / file_name
+                    shutil.copy2(file_path, backup_file)
+                    backed_up_files.append({
+                        'original_path': str(Path(file_path).resolve()),
+                        'backup_path': str(backup_file),
+                        'file_name': file_name
+                    })
+            
+            # 更新檢查點索引
+            checkpoints = self._load_checkpoints_index()
+            checkpoints[checkpoint_id] = {
+                'timestamp': timestamp,
+                'operation_type': operation_type,
+                'files': backed_up_files,
+                'checkpoint_dir': str(checkpoint_dir),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            self._save_checkpoints_index(checkpoints)
+            return checkpoint_id
+            
+        except Exception as e:
+            print(f"  ⚠ Failed to create checkpoint: {e}")
+            return None
+    
+    def _init_saved_models_system(self) -> None:
+        """初始化儲存的聊天模型系統"""
+        try:
+            # 確保儲存模型目錄存在
+            self.saved_models_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 如果索引檔案不存在，創建空的
+            if not self.saved_models_file.exists():
+                self._save_models_index({})
+        except (PermissionError, OSError) as e:
+            print(f"  ⚠ Cannot initialize saved models system: {e}")
+    
+    def _load_models_index(self) -> Dict:
+        """載入儲存的模型索引"""
+        try:
+            if self.saved_models_file.exists():
+                with open(self.saved_models_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError, PermissionError) as e:
+            pass
+        return {}
+    
+    def _save_models_index(self, models: Dict) -> None:
+        """儲存模型索引"""
+        try:
+            with open(self.saved_models_file, 'w', encoding='utf-8') as f:
+                json.dump(models, f, indent=2, ensure_ascii=False)
+        except (PermissionError, OSError) as e:
+            print(f"  ⚠ Cannot save models index: {e}")
+    
+    def _generate_modelfile(self, model_name: str, base_model: str, conversation_history: List[Dict]) -> str:
+        """生成 Ollama Modelfile 內容"""
+        
+        # 將聊天記錄轉換為系統提示
+        system_prompt = f"""You are {model_name}, an AI assistant trained from conversation history.
+
+CONVERSATION CONTEXT:
+The following is your conversation history that defines your personality and knowledge:
+
+"""
+        
+        for i, entry in enumerate(conversation_history):
+            if entry.get('role') == 'user':
+                system_prompt += f"USER: {entry.get('content', '')}\n\n"
+            elif entry.get('role') == 'assistant':
+                system_prompt += f"ASSISTANT: {entry.get('content', '')}\n\n"
+        
+        system_prompt += f"""
+INSTRUCTIONS:
+- Continue conversations in the same style and tone established above
+- Reference previous context when relevant
+- Maintain consistency with the personality shown in the conversation history
+- If asked about your training or background, mention that you were created from conversation history in LocalLM CLI
+"""
+        
+        # 生成 Modelfile
+        template_content = "{{ if .System }}<|start_header_id|>system<|end_header_id|>\n\n{{ .System }}<|eot_id|>{{ end }}{{ if .Prompt }}<|start_header_id|>user<|end_header_id|>\n\n{{ .Prompt }}<|eot_id|>{{ end }}<|start_header_id|>assistant<|end_header_id|>\n\n{{ .Response }}<|eot_id|>"
+        
+        modelfile_content = f"""FROM {base_model}
+
+SYSTEM \"\"\"{system_prompt}\"\"\"
+
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.1
+
+TEMPLATE \"\"\"{template_content}\"\"\"
+"""
+        
+        return modelfile_content
+    
     def handle_read_command(self, args: List[str]) -> None:
         """處理讀取檔案指令"""
         if not args:
@@ -173,8 +390,16 @@ class LocalLMCLI:
         
         file_path = args[0]
         try:
-            content = read_file(file_path)
-            print(f"\n  ── {file_path} ──")
+            # 檢查是否為 PDF 文件
+            if file_path.lower().endswith('.pdf'):
+                # 導入 PDF 讀取功能
+                from tools import read_pdf
+                content = read_pdf(file_path)
+                print(f"\n  ── {file_path} (PDF) ──")
+            else:
+                content = read_file(file_path)
+                print(f"\n  ── {file_path} ──")
+            
             print()
             print(content)
             print()
@@ -182,8 +407,183 @@ class LocalLMCLI:
             print(f"  ✗ File not found: {file_path}")
         except PermissionError:
             print(f"  ✗ Permission denied: {file_path}")
+        except ImportError as e:
+            print(f"  ✗ PDF support not available: {e}")
+            print("  💡 Install PyMuPDF: pip install pymupdf")
         except Exception as e:
             print(f"  ✗ Error: {e}")
+    
+    def handle_analyze_command(self, args: List[str]) -> None:
+        """處理深度分析 PDF 指令"""
+        if not args:
+            print("  ⚠ Usage: /analyze <pdf_path> [query]")
+            print("  Examples:")
+            print("    /analyze document.pdf")
+            print("    /analyze document.pdf 「這份文件的主要內容是什麼？」")
+            return
+        
+        pdf_path = args[0]
+        query = ' '.join(args[1:]) if len(args) > 1 else None
+        
+        try:
+            # 檢查是否為 PDF 文件
+            if not pdf_path.lower().endswith('.pdf'):
+                print("  ⚠ 分析功能目前只支援 PDF 文件")
+                return
+            
+            # 檢查 RAG 支援
+            try:
+                from rag import is_rag_available, create_rag_processor
+                if not is_rag_available():
+                    print("  ✗ RAG 功能不可用，請安裝依賴:")
+                    print("    pip install sentence-transformers chromadb")
+                    return
+            except ImportError:
+                print("  ✗ RAG 模組不可用")
+                return
+            
+            # 讀取 PDF 內容
+            try:
+                from tools import read_pdf
+                print(f"  📖 正在讀取 PDF: {pdf_path}")
+                pdf_content = read_pdf(pdf_path)
+                
+                if not pdf_content.strip():
+                    print("  ⚠ PDF 內容為空或無法提取文字")
+                    return
+                
+            except Exception as e:
+                print(f"  ✗ 無法讀取 PDF: {e}")
+                return
+            
+            # 創建 RAG 處理器
+            print("  🔧 初始化 RAG 處理器...")
+            rag_processor = create_rag_processor()
+            
+            # 處理 PDF 文字並建立向量資料庫
+            print("  🔄 處理文字並建立向量資料庫...")
+            result = rag_processor.process_pdf_text(pdf_content, pdf_path)
+            
+            print(f"  ✓ 處理完成:")
+            print(f"    - 原始長度: {result['original_length']} 字符")
+            print(f"    - 清理後長度: {result['cleaned_length']} 字符")
+            print(f"    - 分割片段: {result['chunk_count']} 個")
+            print(f"    - 向量維度: {result['embedding_dimension']}")
+            
+            # 如果有查詢，進行搜索和回答
+            if query:
+                print(f"\n  🔍 搜索查詢: 「{query}」")
+                search_results = rag_processor.search_documents(query, n_results=3)
+                
+                if search_results:
+                    print(f"  📋 找到 {len(search_results)} 個相關片段:")
+                    for i, result in enumerate(search_results, 1):
+                        similarity = result['similarity_score']
+                        text_preview = result['text'][:100] + "..." if len(result['text']) > 100 else result['text']
+                        print(f"    {i}. 相似度: {similarity:.3f}")
+                        print(f"       {text_preview}")
+                        print()
+                    
+                    # 生成 RAG 回答
+                    print("  🤖 基於文檔內容的回答:")
+                    print("  " + "─" * 50)
+                    rag_response = rag_processor.generate_rag_response(query, search_results)
+                    print(f"  {rag_response}")
+                    print("  " + "─" * 50)
+                else:
+                    print("  ⚠ 沒有找到相關內容")
+            else:
+                # 顯示資料庫統計
+                stats = rag_processor.get_database_stats()
+                print(f"\n  📊 向量資料庫統計:")
+                print(f"    - 集合名稱: {stats.get('collection_name', 'N/A')}")
+                print(f"    - 文檔數量: {stats.get('document_count', 0)}")
+                print(f"    - 存儲路徑: {stats.get('persist_directory', 'N/A')}")
+                print("\n  💡 使用 /analyze <pdf_path> <query> 來搜索特定內容")
+            
+        except Exception as e:
+            print(f"  ✗ 分析失敗: {e}")
+            import traceback
+            print(f"  詳細錯誤: {traceback.format_exc()}")
+    
+    def handle_ocr_command(self, args: List[str]) -> None:
+        """處理 OCR 指令"""
+        if not args:
+            print("  ⚠ Usage: /ocr <pdf_path>")
+            print("  Examples:")
+            print("    /ocr scanned_document.pdf")
+            print("    /ocr image_based.pdf")
+            return
+        
+        pdf_path = args[0]
+        
+        try:
+            # 檢查是否為 PDF 文件
+            if not pdf_path.lower().endswith('.pdf'):
+                print("  ⚠ OCR 功能目前只支援 PDF 文件")
+                return
+            
+            # 檢查 OCR 支援
+            try:
+                from tools.ocr_tools import is_ocr_available, create_ocr_processor, get_ocr_installation_instructions
+                
+                if not is_ocr_available():
+                    print("  ✗ OCR 功能不可用")
+                    print("\n  📋 安裝說明:")
+                    print(get_ocr_installation_instructions())
+                    return
+                    
+            except ImportError:
+                print("  ✗ OCR 模組不可用")
+                return
+            
+            # 檢查文件是否存在
+            if not os.path.exists(pdf_path):
+                print(f"  ✗ 文件不存在: {pdf_path}")
+                return
+            
+            print(f"  🔍 開始 OCR 處理: {pdf_path}")
+            
+            # 創建 OCR 處理器
+            ocr_processor = create_ocr_processor(language='eng+chi_tra')
+            if not ocr_processor:
+                print("  ✗ OCR 處理器創建失敗")
+                return
+            
+            # 使用 OCR 提取文字
+            print("  ⏳ 正在進行 OCR 識別，請稍候...")
+            ocr_text = ocr_processor.extract_text_from_pdf(pdf_path)
+            
+            if ocr_text.strip():
+                print(f"\n  ✅ OCR 識別完成")
+                print(f"  📄 識別出的文字內容:")
+                print("  " + "─" * 50)
+                # 顯示前 500 字符的預覽
+                preview = ocr_text[:500] + "..." if len(ocr_text) > 500 else ocr_text
+                print(f"  {preview}")
+                print("  " + "─" * 50)
+                print(f"  📊 總字符數: {len(ocr_text)}")
+                
+                # 詢問是否保存結果
+                response = input("\n  💾 是否將 OCR 結果保存到文字檔？ (y/N): ").strip().lower()
+                if response in ['y', 'yes', '是']:
+                    output_path = pdf_path.replace('.pdf', '_ocr.txt')
+                    try:
+                        from tools import write_file
+                        write_file(output_path, ocr_text)
+                        print(f"  ✅ OCR 結果已保存至: {output_path}")
+                    except Exception as e:
+                        print(f"  ✗ 保存失敗: {e}")
+            else:
+                print("  ⚠ OCR 未能識別出任何文字內容")
+                print("  💡 可能原因:")
+                print("    - 圖片質量不佳")
+                print("    - 字體過小或模糊")
+                print("    - 語言設定不正確")
+                print("    - PDF 本身沒有文字內容")
+        
+        except Exception as e:
+            print(f"  ✗ OCR 處理失敗: {e}")
     
     def handle_write_command(self, args: List[str]) -> None:
         """處理寫入檔案指令"""
@@ -261,6 +661,69 @@ class LocalLMCLI:
                 print()
             else:
                 print(f"  Empty directory: {directory}")
+        except FileNotFoundError:
+            print(f"  ✗ Directory not found: {directory}")
+        except Exception as e:
+            print(f"  ✗ Error: {e}")
+    
+    def handle_tree_command(self, args: List[str]) -> None:
+        """處理樹狀顯示目錄結構指令"""
+        directory = args[0] if args else "."
+        max_depth = int(args[1]) if len(args) > 1 and args[1].isdigit() else 3
+        
+        try:
+            from pathlib import Path
+            
+            def print_tree(path: Path, prefix: str = "", depth: int = 0):
+                if depth > max_depth:
+                    return
+                
+                items = []
+                try:
+                    # 分別收集資料夾和檔案
+                    dirs = [p for p in path.iterdir() if p.is_dir() and not p.name.startswith('.')]
+                    files = [p for p in path.iterdir() if p.is_file() and not p.name.startswith('.')]
+                    items = sorted(dirs) + sorted(files)
+                except PermissionError:
+                    return
+                
+                for i, item in enumerate(items):
+                    is_last = i == len(items) - 1
+                    current_prefix = "└── " if is_last else "├── "
+                    next_prefix = prefix + ("    " if is_last else "│   ")
+                    
+                    # 添加類型標示
+                    if item.is_dir():
+                        icon = "📁"
+                        name = f"{icon} {item.name}/"
+                    else:
+                        # 根據副檔名顯示不同圖示
+                        suffix = item.suffix.lower()
+                        if suffix in ['.py', '.pyw']:
+                            icon = "🐍"
+                        elif suffix in ['.js', '.ts', '.jsx', '.tsx']:
+                            icon = "📜"
+                        elif suffix in ['.md', '.txt', '.doc', '.docx']:
+                            icon = "📄"
+                        elif suffix in ['.json', '.yaml', '.yml', '.xml']:
+                            icon = "⚙️"
+                        elif suffix in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
+                            icon = "🖼️"
+                        else:
+                            icon = "📝"
+                        name = f"{icon} {item.name}"
+                    
+                    print(f"  {prefix}{current_prefix}{name}")
+                    
+                    # 遞迴顯示子目錄
+                    if item.is_dir() and depth < max_depth:
+                        print_tree(item, next_prefix, depth + 1)
+            
+            root_path = Path(directory).resolve()
+            print(f"\n  📂 {root_path.name if root_path.name else root_path} (depth: {max_depth})")
+            print_tree(root_path)
+            print()
+            
         except FileNotFoundError:
             print(f"  ✗ Directory not found: {directory}")
         except Exception as e:
@@ -580,11 +1043,23 @@ class LocalLMCLI:
         print("\n")
         print("  ╭─ Commands ─────────────────────────╮")
         print("  │                                    │")
-        print("  │  /read <path>     Read file        │")
+        print("  │  /read <path>     Read file+PDF    │")
+        print("  │  /analyze <pdf>   Deep PDF+RAG     │")
+        print("  │  /ocr <pdf>       OCR scanned PDF  │")
         print("  │  /write <path>    Write file       │")  
         print("  │  /edit <path>     Edit file        │")
         print("  │  /create <path>   Create file      │")
         print("  │  /list [dir]      List files       │")
+        print("  │  /tree [dir]      Tree view        │")
+        print("  │  /patch <file>    Safe code patch  │")
+        print("  │  /clear           Clear screen     │")
+        print("  │  /bye             Clear history    │")
+        print("  │  /load <model>    Reload model     │")
+        print("  │  /dir <add|show>  Workspace dirs   │")
+        print("  │  /restore [id]    Restore files    │")
+        print("  │  /save <name>     Save chat model  │")
+        print("  │  /saved [cmd]     Manage saved     │")
+        print("  │  /init [dir]      Create GEMINI.md │")
         print("  │  /pwd             Show path        │")
         print("  │  /models          Show models      │")
         print("  │  /switch <name>   Switch model     │")
@@ -595,6 +1070,862 @@ class LocalLMCLI:
         print("  │                                    │")
         print("  ╰────────────────────────────────────╯")
         print()
+    
+    def handle_clear_command(self) -> None:
+        """清除終端畫面與 CLI 歷史記錄（僅視覺）"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+        self.conversation_history.clear()
+        print("\n  [畫面已清除]\n")
+    
+    def handle_bye_command(self, args: Optional[List[str]] = None) -> None:
+        """清空對話歷史並重新開始（類似 Ollama 的 /bye）"""
+        history_count = len(self.conversation_history)
+        
+        if history_count > 0:
+            self.conversation_history.clear()
+            print(f"  👋 Bye! Cleared {history_count} conversation entries")
+            print(f"  🔄 Restarted fresh session with {self.default_model}")
+        else:
+            print("  👋 Bye! (No conversation history to clear)")
+        
+        print(f"  💭 Ready for a new conversation...")
+        print()
+    
+    def handle_load_command(self, args: List[str]) -> None:
+        """重新載入指定模型並清空歷史記錄"""
+        if not args:
+            # 如果沒有指定模型，重新載入當前模型
+            self.handle_load_command([self.default_model])
+            return
+        
+        new_model = args[0]
+        
+        # 檢查模型是否存在
+        from models import list_models
+        available_models = list_models()
+        
+        if not available_models:
+            print("  ❌ Cannot get model list from Ollama")
+            return
+        
+        # 建立模型名稱列表（包含別名）
+        model_names = set()
+        for model in available_models:
+            name = model.get('name', '')
+            if name:
+                model_names.add(name)
+                # 添加不帶標籤的版本
+                if ':' in name:
+                    base_name = name.split(':')[0]
+                    model_names.add(base_name)
+        
+        # 檢查模型是否存在
+        if new_model not in model_names:
+            print(f"  ❌ Model '{new_model}' not found")
+            print("  💡 Use '/models' to see available models")
+            return
+        
+        # 記錄舊狀態
+        old_model = self.default_model
+        history_count = len(self.conversation_history)
+        
+        # 更新模型
+        self.default_model = new_model
+        
+        # 清空對話歷史
+        self.conversation_history.clear()
+        
+        # 顯示結果
+        if old_model == new_model:
+            print(f"  🔄 Reloaded model: {new_model}")
+        else:
+            print(f"  🔄 Loaded model: {old_model} → {new_model}")
+        
+        if history_count > 0:
+            print(f"  🧹 Cleared {history_count} conversation entries")
+        
+        print(f"  ✨ Fresh start with {new_model}")
+        print()
+    
+    def handle_restore_command(self, args: List[str]) -> None:
+        """處理檔案還原指令"""
+        if not self.checkpointing_enabled:
+            print("  ⚠ Checkpointing is disabled")
+            print("  Enable with --checkpointing option or in settings")
+            return
+        
+        checkpoints = self._load_checkpoints_index()
+        
+        # 如果沒有指定檢查點 ID，列出所有可用的檢查點
+        if not args:
+            if not checkpoints:
+                print("  ℹ No checkpoints available")
+                print("  Checkpoints are created automatically during file operations")
+                return
+            
+            print(f"  📋 Available Checkpoints ({len(checkpoints)}):")
+            print()
+            
+            # 依時間排序檢查點
+            sorted_checkpoints = sorted(
+                checkpoints.items(), 
+                key=lambda x: x[1]['timestamp'], 
+                reverse=True
+            )
+            
+            for checkpoint_id, info in sorted_checkpoints:
+                timestamp = info['timestamp']
+                operation = info['operation_type']
+                file_count = len(info['files'])
+                
+                # 格式化時間戳記
+                try:
+                    from datetime import datetime
+                    dt = datetime.strptime(timestamp, "%Y%m%d_%H%M%S")
+                    formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    formatted_time = timestamp
+                
+                print(f"    🔖 {checkpoint_id}")
+                print(f"       Time: {formatted_time}")
+                print(f"       Operation: {operation}")
+                print(f"       Files: {file_count} file{'s' if file_count != 1 else ''}")
+                
+                # 顯示涉及的檔案名稱
+                file_names = [f['file_name'] for f in info['files']]
+                if file_names:
+                    if len(file_names) <= 3:
+                        print(f"       → {', '.join(file_names)}")
+                    else:
+                        print(f"       → {', '.join(file_names[:3])} and {len(file_names)-3} more...")
+                print()
+            
+            print("  Use '/restore <checkpoint_id>' to restore files")
+            return
+        
+        # 還原指定的檢查點
+        checkpoint_id = args[0]
+        
+        if checkpoint_id not in checkpoints:
+            print(f"  ✗ Checkpoint not found: {checkpoint_id}")
+            print("  Use '/restore' to list available checkpoints")
+            return
+        
+        try:
+            import shutil
+            
+            checkpoint_info = checkpoints[checkpoint_id]
+            restored_files = []
+            failed_files = []
+            
+            print(f"  🔄 Restoring checkpoint {checkpoint_id}...")
+            
+            for file_info in checkpoint_info['files']:
+                original_path = file_info['original_path']
+                backup_path = file_info['backup_path']
+                file_name = file_info['file_name']
+                
+                try:
+                    if Path(backup_path).exists():
+                        # 確保目標目錄存在
+                        Path(original_path).parent.mkdir(parents=True, exist_ok=True)
+                        
+                        # 還原檔案
+                        shutil.copy2(backup_path, original_path)
+                        restored_files.append(file_name)
+                        print(f"    ✓ Restored: {file_name}")
+                    else:
+                        failed_files.append(f"{file_name} (backup not found)")
+                        print(f"    ✗ Backup not found: {file_name}")
+                        
+                except Exception as e:
+                    failed_files.append(f"{file_name} ({str(e)})")
+                    print(f"    ✗ Failed to restore {file_name}: {e}")
+            
+            # 總結
+            print()
+            if restored_files:
+                print(f"  ✅ Successfully restored {len(restored_files)} file{'s' if len(restored_files) != 1 else ''}")
+            
+            if failed_files:
+                print(f"  ⚠ Failed to restore {len(failed_files)} file{'s' if len(failed_files) != 1 else ''}: {', '.join(failed_files)}")
+                
+        except Exception as e:
+            print(f"  ✗ Restore operation failed: {e}")
+    
+    def handle_directory_command(self, args: List[str]) -> None:
+        """處理工作區目錄管理指令"""
+        if not args:
+            print("  ⚠ Usage: /directory <add|show> [paths...]")
+            print("  Examples:")
+            print("    /directory add /path/to/project")
+            print("    /directory add ~/Documents/project1,~/Desktop/project2")
+            print("    /directory show")
+            print("    /dir add ./src")  # 短形式
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == 'add':
+            if len(args) < 2:
+                print("  ⚠ Usage: /directory add <path1>[,<path2>,...]")
+                print("  Examples:")
+                print("    /directory add /absolute/path/to/project")
+                print("    /directory add ~/Documents/project")
+                print("    /directory add ./relative/path")
+                print("    /directory add /path1,/path2,/path3")
+                return
+            
+            # 處理逗號分隔的多個路徑
+            paths_to_add = []
+            path_strings = []
+            
+            # 合併所有參數，然後按逗號分割
+            all_paths_str = ' '.join(args[1:])
+            path_candidates = [p.strip() for p in all_paths_str.split(',') if p.strip()]
+            
+            for path_str in path_candidates:
+                resolved_path = self._resolve_path(path_str)
+                if resolved_path is None:
+                    print(f"  ⚠ Invalid path format: {path_str}")
+                    continue
+                
+                if not resolved_path.exists():
+                    print(f"  ⚠ Path does not exist: {resolved_path}")
+                    continue
+                
+                if not resolved_path.is_dir():
+                    print(f"  ⚠ Path is not a directory: {resolved_path}")
+                    continue
+                
+                abs_path_str = str(resolved_path)
+                if abs_path_str not in self.workspace_directories:
+                    paths_to_add.append(abs_path_str)
+                    path_strings.append(path_str)
+                else:
+                    print(f"  ℹ Already in workspace: {path_str} -> {resolved_path}")
+            
+            if paths_to_add:
+                self.workspace_directories.extend(paths_to_add)
+                self._save_workspace_directories()
+                
+                print(f"  ✓ Added {len(paths_to_add)} director{'y' if len(paths_to_add) == 1 else 'ies'} to workspace:")
+                for orig, resolved in zip(path_strings, paths_to_add):
+                    print(f"    {orig} -> {resolved}")
+            else:
+                print("  ℹ No new directories were added to workspace")
+        
+        elif subcommand == 'show':
+            if not self.workspace_directories:
+                print("  ℹ No directories in workspace")
+                print("  Use '/directory add <path>' to add directories")
+                return
+            
+            print(f"  📁 Workspace Directories ({len(self.workspace_directories)}):")
+            print()
+            
+            current_dir = str(Path.cwd())
+            for i, dir_path in enumerate(self.workspace_directories, 1):
+                path_obj = Path(dir_path)
+                
+                # 檢查目錄是否仍然存在
+                if path_obj.exists():
+                    status = "✓"
+                    # 如果是當前目錄，標記出來
+                    if dir_path == current_dir:
+                        status = "🔸 (current)"
+                    
+                    # 嘗試顯示相對於家目錄的路徑
+                    try:
+                        home_path = Path.home()
+                        if path_obj.is_relative_to(home_path):
+                            relative_path = path_obj.relative_to(home_path)
+                            display_path = f"~/{relative_path}"
+                        else:
+                            display_path = str(path_obj)
+                    except (ValueError, OSError):
+                        display_path = str(path_obj)
+                    
+                    print(f"    {i:2d}. {status} {display_path}")
+                else:
+                    print(f"    {i:2d}. ✗ {dir_path} (not found)")
+            
+            print()
+            print("  Use '/tree' or '/ls' to browse current directory")
+        
+        elif subcommand in ('remove', 'rm', 'delete'):
+            print("  ℹ Directory removal not yet implemented")
+            print("  You can manually edit ~/.locallm/workspaces.json")
+        
+        else:
+            print(f"  ✗ Unknown subcommand: {subcommand}")
+            print("  Available subcommands: add, show")
+    
+    def handle_save_command(self, args: List[str]) -> None:
+        """儲存當前聊天記錄為新的 Ollama 模型"""
+        if not args:
+            print("  ⚠ Usage: /save <model_name> [base_model]")
+            print("  Examples:")
+            print("    /save translator")
+            print("    /save my_assistant llama3.2")
+            print("    /save coding_helper deepseek-coder:6.7b")
+            return
+        
+        model_name = args[0]
+        base_model = args[1] if len(args) > 1 else self.default_model
+        
+        # 驗證模型名稱
+        if not model_name.replace('-', '').replace('_', '').isalnum():
+            print("  ⚠ Model name should only contain letters, numbers, hyphens, and underscores")
+            return
+        
+        # 檢查是否有聊天記錄
+        if not self.conversation_history:
+            print("  ⚠ No conversation history to save")
+            print("  Start a conversation first, then use /save to create a model")
+            return
+        
+        try:
+            import subprocess
+            import tempfile
+            from datetime import datetime
+            
+            print(f"  💾 Saving conversation as model '{model_name}'...")
+            print(f"  📋 Conversation entries: {len(self.conversation_history)}")
+            print(f"  🎯 Base model: {base_model}")
+            
+            # 生成 Modelfile 內容
+            modelfile_content = self._generate_modelfile(model_name, base_model, self.conversation_history)
+            
+            # 創建臨時 Modelfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.Modelfile', delete=False, encoding='utf-8') as f:
+                f.write(modelfile_content)
+                modelfile_path = f.name
+            
+            # 使用 ollama create 創建模型
+            print(f"  🔨 Creating Ollama model...")
+            
+            create_cmd = ['ollama', 'create', model_name, '-f', modelfile_path]
+            result = subprocess.run(create_cmd, capture_output=True, text=True, timeout=300)
+            
+            # 清理臨時檔案
+            Path(modelfile_path).unlink(missing_ok=True)
+            
+            if result.returncode == 0:
+                # 儲存模型資訊到索引
+                models_index = self._load_models_index()
+                models_index[model_name] = {
+                    'created_at': datetime.now().isoformat(),
+                    'base_model': base_model,
+                    'conversation_entries': len(self.conversation_history),
+                    'model_size': 'unknown',  # Ollama 不提供簡單的方式獲取大小
+                    'description': f'Saved from LocalLM CLI conversation with {len(self.conversation_history)} entries'
+                }
+                self._save_models_index(models_index)
+                
+                print(f"  ✅ Model '{model_name}' created successfully!")
+                print()
+                print(f"  🚀 To use this model:")
+                print(f"     ollama run {model_name}")
+                print()
+                print(f"  🗑️  To remove this model:")
+                print(f"     ollama rm {model_name}")
+                
+            else:
+                print(f"  ✗ Failed to create model: {result.stderr}")
+                if "model not found" in result.stderr.lower():
+                    print(f"  💡 Base model '{base_model}' not found. Try:")
+                    print(f"     ollama pull {base_model}")
+                
+        except subprocess.TimeoutExpired:
+            print("  ⚠ Model creation timed out (>5 minutes)")
+        except subprocess.CalledProcessError as e:
+            print(f"  ✗ Command failed: {e}")
+        except Exception as e:
+            print(f"  ✗ Error saving model: {e}")
+    
+    def handle_saved_command(self, args: Optional[List[str]]) -> None:
+        """管理儲存的聊天模型"""
+        if not args:
+            # 列出所有儲存的模型
+            models_index = self._load_models_index()
+            
+            if not models_index:
+                print("  ℹ No saved conversation models")
+                print("  Use '/save <model_name>' to save current conversation as a model")
+                return
+            
+            print(f"  🤖 Saved Conversation Models ({len(models_index)}):")
+            print()
+            
+            # 按創建時間排序
+            sorted_models = sorted(
+                models_index.items(),
+                key=lambda x: x[1].get('created_at', ''),
+                reverse=True
+            )
+            
+            for model_name, info in sorted_models:
+                created_at = info.get('created_at', 'unknown')
+                base_model = info.get('base_model', 'unknown')
+                entries = info.get('conversation_entries', 0)
+                description = info.get('description', 'No description')
+                
+                # 格式化時間
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    formatted_time = created_at
+                
+                print(f"    📦 {model_name}")
+                print(f"       Created: {formatted_time}")
+                print(f"       Base: {base_model}")
+                print(f"       Conversations: {entries} entries")
+                print(f"       Description: {description}")
+                print()
+            
+            print("  🚀 To use a model: ollama run <model_name>")
+            print("  🗑️  To remove a model: ollama rm <model_name>")
+            print("  📋 To see all Ollama models: /models")
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == 'remove' or subcommand == 'rm':
+            if len(args) < 2:
+                print("  ⚠ Usage: /saved remove <model_name>")
+                return
+            
+            model_name = args[1]
+            
+            try:
+                import subprocess
+                
+                print(f"  🗑️  Removing model '{model_name}'...")
+                
+                # 使用 ollama rm 刪除模型
+                result = subprocess.run(['ollama', 'rm', model_name], 
+                                      capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    # 從索引中移除
+                    models_index = self._load_models_index()
+                    if model_name in models_index:
+                        del models_index[model_name]
+                        self._save_models_index(models_index)
+                    
+                    print(f"  ✅ Model '{model_name}' removed successfully!")
+                else:
+                    print(f"  ⚠ Failed to remove model: {result.stderr}")
+                    if "model not found" in result.stderr.lower():
+                        # 即使 Ollama 中不存在，也從索引中移除
+                        models_index = self._load_models_index()
+                        if model_name in models_index:
+                            del models_index[model_name]
+                            self._save_models_index(models_index)
+                            print(f"  🧹 Cleaned up model from saved models index")
+                        
+            except subprocess.TimeoutExpired:
+                print("  ⚠ Remove operation timed out")
+            except Exception as e:
+                print(f"  ✗ Error removing model: {e}")
+        
+        elif subcommand == 'clean':
+            # 清理不存在的模型
+            self._clean_saved_models_index()
+            
+        else:
+            print(f"  ✗ Unknown subcommand: {subcommand}")
+            print("  Available subcommands: remove, clean")
+    
+    def _clean_saved_models_index(self) -> None:
+        """清理索引中不存在的模型"""
+        try:
+            import subprocess
+            
+            print("  🧹 Cleaning saved models index...")
+            
+            # 獲取 Ollama 中的實際模型列表
+            result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                print("  ⚠ Could not get Ollama model list")
+                return
+            
+            # 解析 ollama list 輸出
+            existing_models = set()
+            for line in result.stdout.split('\n')[1:]:  # 跳過標題行
+                if line.strip():
+                    model_name = line.split()[0]
+                    if ':' not in model_name or model_name.endswith(':latest'):
+                        model_name = model_name.replace(':latest', '')
+                    existing_models.add(model_name)
+            
+            # 檢查索引中的模型
+            models_index = self._load_models_index()
+            removed_count = 0
+            
+            for model_name in list(models_index.keys()):
+                if model_name not in existing_models:
+                    del models_index[model_name]
+                    removed_count += 1
+                    print(f"    ✓ Removed '{model_name}' from index (not found in Ollama)")
+            
+            if removed_count > 0:
+                self._save_models_index(models_index)
+                print(f"  ✅ Cleaned {removed_count} model{'s' if removed_count != 1 else ''} from index")
+            else:
+                print("  ✅ Index is already clean")
+                
+        except Exception as e:
+            print(f"  ✗ Error cleaning index: {e}")
+    
+    def handle_init_command(self, args: List[str]) -> None:
+        """分析專案目錄並生成 GEMINI.md 指示檔案"""
+        target_dir = Path.cwd()
+        
+        # 如果指定了目錄參數
+        if args:
+            resolved_path = self._resolve_path(args[0])
+            if resolved_path and resolved_path.exists() and resolved_path.is_dir():
+                target_dir = resolved_path
+            else:
+                print(f"  ⚠ Invalid directory: {args[0]}")
+                return
+        
+        gemini_file = target_dir / "GEMINI.md"
+        
+        print(f"  🔍 Analyzing project directory: {target_dir}")
+        print(f"  📝 Generating GEMINI.md...")
+        
+        try:
+            # 分析專案結構
+            project_info = self._analyze_project_structure(target_dir)
+            
+            # 生成 GEMINI.md 內容
+            gemini_content = self._generate_gemini_content(project_info, target_dir)
+            
+            # 檢查是否已存在 GEMINI.md
+            if gemini_file.exists():
+                print(f"  ⚠ GEMINI.md already exists")
+                response = input("  Overwrite existing file? (y/N): ").strip().lower()
+                if response not in ['y', 'yes']:
+                    print("  ✗ Operation cancelled")
+                    return
+            
+            # 寫入檔案
+            with open(gemini_file, 'w', encoding='utf-8') as f:
+                f.write(gemini_content)
+            
+            print(f"  ✅ GEMINI.md created successfully!")
+            print(f"  📄 File location: {gemini_file}")
+            print()
+            print("  💡 You can now use this file to provide context to Gemini agents")
+            print("  📖 Edit the file to add project-specific instructions")
+            
+        except Exception as e:
+            print(f"  ✗ Failed to create GEMINI.md: {e}")
+    
+    def _analyze_project_structure(self, project_dir: Path) -> Dict:
+        """分析專案結構並收集資訊"""
+        info = {
+            'name': project_dir.name,
+            'path': str(project_dir),
+            'files': [],
+            'directories': [],
+            'languages': set(),
+            'frameworks': set(),
+            'config_files': [],
+            'doc_files': [],
+            'total_files': 0,
+            'project_type': 'unknown'
+        }
+        
+        # 定義檔案類型和框架標識
+        language_extensions = {
+            '.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript',
+            '.java': 'Java', '.cpp': 'C++', '.c': 'C', '.cs': 'C#',
+            '.php': 'PHP', '.rb': 'Ruby', '.go': 'Go', '.rs': 'Rust',
+            '.html': 'HTML', '.css': 'CSS', '.scss': 'SCSS', '.less': 'LESS',
+            '.vue': 'Vue.js', '.jsx': 'React', '.tsx': 'React/TypeScript'
+        }
+        
+        framework_files = {
+            'package.json': 'Node.js/npm',
+            'requirements.txt': 'Python',
+            'Pipfile': 'Python/Pipenv', 
+            'pyproject.toml': 'Python',
+            'Cargo.toml': 'Rust',
+            'pom.xml': 'Java/Maven',
+            'build.gradle': 'Java/Gradle',
+            'composer.json': 'PHP/Composer',
+            'Gemfile': 'Ruby/Bundler'
+        }
+        
+        config_patterns = [
+            '.gitignore', '.env', 'docker-compose.yml', 'Dockerfile',
+            'tsconfig.json', 'webpack.config.js', 'vite.config.js',
+            'next.config.js', '.eslintrc', 'pytest.ini', 'setup.cfg'
+        ]
+        
+        doc_patterns = [
+            'README.md', 'README.txt', 'CHANGELOG.md', 'LICENSE',
+            'CONTRIBUTING.md', 'docs/', 'documentation/'
+        ]
+        
+        try:
+            # 遍歷目錄（避免深度過深和隱藏目錄）
+            for item in project_dir.rglob('*'):
+                if item.is_file():
+                    # 跳過隱藏檔案和特定目錄
+                    if any(part.startswith('.') for part in item.parts if part != item.name) or \
+                       any(part in ['node_modules', '__pycache__', '.git', 'dist', 'build'] for part in item.parts):
+                        continue
+                    
+                    info['total_files'] += 1
+                    relative_path = item.relative_to(project_dir)
+                    
+                    # 檢查語言
+                    suffix = item.suffix.lower()
+                    if suffix in language_extensions:
+                        info['languages'].add(language_extensions[suffix])
+                    
+                    # 檢查框架和配置檔案
+                    if item.name in framework_files:
+                        info['frameworks'].add(framework_files[item.name])
+                        info['config_files'].append(str(relative_path))
+                    
+                    # 檢查配置檔案
+                    if any(pattern in item.name.lower() for pattern in config_patterns):
+                        info['config_files'].append(str(relative_path))
+                    
+                    # 檢查文檔檔案
+                    if any(pattern.lower() in str(relative_path).lower() for pattern in doc_patterns):
+                        info['doc_files'].append(str(relative_path))
+                    
+                    # 限制顯示的檔案數量
+                    if len(info['files']) < 50:
+                        info['files'].append(str(relative_path))
+                
+                elif item.is_dir() and len(info['directories']) < 20:
+                    relative_path = item.relative_to(project_dir)
+                    if not any(part.startswith('.') for part in relative_path.parts):
+                        info['directories'].append(str(relative_path))
+        
+        except Exception as e:
+            print(f"  ⚠ Error analyzing directory: {e}")
+        
+        # 推斷專案類型
+        if 'Python' in info['languages']:
+            if 'requirements.txt' in [f.split('/')[-1] for f in info['config_files']]:
+                info['project_type'] = 'Python Application'
+            else:
+                info['project_type'] = 'Python Project'
+        elif 'JavaScript' in info['languages'] or 'TypeScript' in info['languages']:
+            if 'Node.js/npm' in info['frameworks']:
+                info['project_type'] = 'Node.js Project'
+        elif 'Java' in info['languages']:
+            info['project_type'] = 'Java Project'
+        
+        return info
+    
+    def _generate_gemini_content(self, project_info: Dict, project_dir: Path) -> str:
+        """生成 GEMINI.md 內容"""
+        content = f"""# {project_info['name']} - Gemini AI Instructions
+
+Generated by LocalLM CLI on {Path().cwd()}
+
+## Project Overview
+
+**Project Name:** {project_info['name']}
+**Project Type:** {project_info['project_type']}
+**Location:** {project_info['path']}
+**Total Files:** {project_info['total_files']}
+
+## Technology Stack
+
+"""
+        
+        if project_info['languages']:
+            content += "**Languages:** " + ", ".join(sorted(project_info['languages'])) + "\n\n"
+        
+        if project_info['frameworks']:
+            content += "**Frameworks/Tools:** " + ", ".join(sorted(project_info['frameworks'])) + "\n\n"
+        
+        # 專案結構
+        content += "## Project Structure\n\n"
+        
+        if project_info['directories']:
+            content += "**Key Directories:**\n"
+            for dir_path in sorted(project_info['directories'][:10]):
+                content += f"- `{dir_path}/`\n"
+            content += "\n"
+        
+        if project_info['config_files']:
+            content += "**Configuration Files:**\n"
+            for config_file in sorted(project_info['config_files'][:10]):
+                content += f"- `{config_file}`\n"
+            content += "\n"
+        
+        if project_info['doc_files']:
+            content += "**Documentation:**\n"
+            for doc_file in sorted(project_info['doc_files'][:5]):
+                content += f"- `{doc_file}`\n"
+            content += "\n"
+        
+        # AI 指示
+        content += """## Instructions for AI Assistants
+
+### General Guidelines
+- This project uses the technologies listed above
+- Follow best practices for the identified programming languages
+- Respect the existing project structure and naming conventions
+- Preserve any configuration files and their formats
+
+### Code Style & Standards
+- Maintain consistency with existing code patterns
+- Add appropriate comments and documentation
+- Follow the project's dependency management approach
+
+### When Making Changes
+- Always backup important files before modifications
+- Test changes in development environment first  
+- Update documentation if adding new features
+- Consider backwards compatibility
+
+### Project-Specific Notes
+
+**TODO:** Add project-specific instructions here, such as:
+- Special coding conventions
+- Deployment procedures  
+- Testing requirements
+- Business logic explanations
+- API documentation links
+- Development workflow notes
+
+## File Operations
+
+This project can be managed using LocalLM CLI commands:
+- `/read <file>` - Read file contents
+- `/write <file>` - Write new files  
+- `/edit <file>` - Edit existing files
+- `/tree` - View project structure
+- `/patch <file>` - Safe code modifications with auto-backup
+- `/restore` - Restore from checkpoints if available
+
+---
+*This file was auto-generated. Please customize it with project-specific instructions.*
+"""
+        
+        return content
+    
+    def handle_patch_command(self, args: List[str]) -> None:
+        """安全地做小幅程式碼變更，並自動備份"""
+        if not args:
+            print("  ✗ Usage: /patch <file> [old_text->new_text]")
+            print("  Example: /patch main.py 'old_code'->'new_code'")
+            print("  Example: /patch config.json  (interactive mode)")
+            return
+        
+        filepath = args[0]
+        
+        try:
+            from datetime import datetime
+            import shutil
+            
+            # 檢查檔案是否存在
+            if not file_exists(filepath):
+                print(f"  ✗ File not found: {filepath}")
+                return
+            
+            # 自動備份
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"{filepath}.backup_{timestamp}"
+            shutil.copy2(filepath, backup_path)
+            print(f"  📦 Backup created: {backup_path}")
+            
+            # 讀取原始內容
+            original_content = read_file(filepath)
+            if not original_content:
+                print(f"  ✗ Could not read file: {filepath}")
+                return
+            
+            # 如果有指定變更內容
+            if len(args) > 1:
+                change_spec = " ".join(args[1:])
+                
+                # 解析 'old->new' 格式
+                if '->' in change_spec:
+                    parts = change_spec.split('->', 1)
+                    if len(parts) == 2:
+                        old_text = parts[0].strip().strip("'\"")
+                        new_text = parts[1].strip().strip("'\"")
+                        
+                        if old_text in original_content:
+                            new_content = original_content.replace(old_text, new_text, 1)  # 只替換第一個
+                            
+                            # 安全寫入
+                            if write_file(filepath, new_content):
+                                print(f"  ✅ Patched: {filepath}")
+                                print(f"  📝 Changed: '{old_text}' -> '{new_text}'")
+                                print(f"  💾 Backup: {backup_path}")
+                            else:
+                                # 寫入失敗，還原備份
+                                shutil.copy2(backup_path, filepath)
+                                print(f"  ✗ Patch failed, restored from backup")
+                        else:
+                            print(f"  ✗ Text not found: '{old_text}'")
+                    else:
+                        print("  ✗ Invalid format. Use: 'old_text'->'new_text'")
+                else:
+                    print("  ✗ Invalid format. Use: 'old_text'->'new_text'")
+            else:
+                # 互動模式
+                print(f"  📄 File: {filepath} ({len(original_content.splitlines())} lines)")
+                print("  🔍 Enter text to find and replace (or 'q' to quit):")
+                
+                while True:
+                    find_text = input("  Find: ").strip()
+                    if find_text.lower() == 'q':
+                        break
+                    
+                    if find_text in original_content:
+                        replace_text = input("  Replace with: ").strip()
+                        
+                        # 預覽變更
+                        lines = original_content.splitlines()
+                        matching_lines = [i+1 for i, line in enumerate(lines) if find_text in line]
+                        
+                        if matching_lines:
+                            print(f"  📍 Found in lines: {', '.join(map(str, matching_lines))}")
+                            confirm = input("  Apply patch? (y/N): ").strip().lower()
+                            
+                            if confirm == 'y':
+                                new_content = original_content.replace(find_text, replace_text, 1)
+                                
+                                if write_file(filepath, new_content):
+                                    print(f"  ✅ Patched: {filepath}")
+                                    print(f"  💾 Backup: {backup_path}")
+                                    break
+                                else:
+                                    shutil.copy2(backup_path, filepath)
+                                    print(f"  ✗ Patch failed, restored from backup")
+                                    break
+                        else:
+                            print("  ✗ No matching lines found")
+                    else:
+                        print(f"  ✗ Text not found: '{find_text}'")
+                        
+        except Exception as e:
+            print(f"  ✗ Patch error: {e}")
+            # 如果有備份，嘗試還原
+            try:
+                if 'backup_path' in locals():
+                    shutil.copy2(backup_path, filepath)
+                    print(f"  🔄 Restored from backup: {backup_path}")
+            except:
+                pass
     
     def run(self):
         """執行主程式循環"""
@@ -616,10 +1947,32 @@ class LocalLMCLI:
                     print("\n  Goodbye! 👋")
                     import os
                     os._exit(0)
+                elif command == 'clear':
+                    self.handle_clear_command()
+                elif command == 'bye':
+                    self.handle_bye_command(args)
+                elif command == 'load':
+                    self.handle_load_command(args)
+                elif command == 'patch':
+                    self.handle_patch_command(args)
+                elif command == 'directory' or command == 'dir':
+                    self.handle_directory_command(args)
+                elif command == 'restore':
+                    self.handle_restore_command(args)
+                elif command == 'save':
+                    self.handle_save_command(args)
+                elif command == 'saved':
+                    self.handle_saved_command(args)
+                elif command == 'init':
+                    self.handle_init_command(args)
                 elif command == 'help':
                     self.handle_help_command()
                 elif command == 'read':
                     self.handle_read_command(args)
+                elif command == 'analyze':
+                    self.handle_analyze_command(args)
+                elif command == 'ocr':
+                    self.handle_ocr_command(args)
                 elif command == 'write':
                     self.handle_write_command(args)
                 elif command == 'edit':
@@ -628,6 +1981,8 @@ class LocalLMCLI:
                     self.handle_create_command(args)
                 elif command == 'list' or command == 'ls':
                     self.handle_list_command(args)
+                elif command == 'tree':
+                    self.handle_tree_command(args)
                 elif command == 'pwd':
                     print(f"  Current: {get_current_path()}")
                 elif command == 'models':
@@ -651,9 +2006,10 @@ class LocalLMCLI:
                 else:
                     print(f"\n  ⚠ Press Ctrl+C again to exit")
             except EOFError:
-                print("\n\n  Goodbye! 👋")
-                import os
-                os._exit(0)
+                # Ctrl+D 按鍵：執行 /bye 功能而不是退出程式
+                print("\n")
+                self.handle_bye_command()
+                continue
             except Exception as e:
                 print(f"  ✗ Unexpected error: {e}")
 
@@ -665,8 +2021,8 @@ def main():
     parser = argparse.ArgumentParser(description="LocalLM CLI - 本地模型檔案操作工具")
     parser.add_argument(
         '--model', '-m',
-        default='llama3.2',
-        help='指定使用的模型名稱 (預設: llama3.2)'
+        default='qwen3:8b',
+        help='指定使用的模型名稱 (預設: qwen3:8b)'
     )
     
     args = parser.parse_args()

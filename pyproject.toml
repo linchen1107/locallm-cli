@@ -48,6 +48,29 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/locallm/locallm-cli"
 Repository = "https://github.com/locallm/locallm-cli.git"
+
+[project.scripts]
+locallm = "main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.pylance]
+extraPaths = ["src"]
 Documentation = "https://github.com/locallm/locallm-cli/docs"
 Issues = "https://github.com/locallm/locallm-cli/issues"
 

@@ -2,3 +2,23 @@
 httpx>=0.25.0
 rich>=13.0.0
 pyfiglet>=0.8.0
+
+# PDF 處理支援
+pymupdf>=1.23.0
+
+# RAG 系統支援
+sentence-transformers>=2.2.0
+chromadb>=0.4.0
+numpy>=1.21.0
+
+# OCR 支援 (可選)
+pytesseract>=0.3.10
+Pillow>=8.3.0
+
+# 文字處理
+nltk>=3.8
+spacy>=3.4.0
+
+# 表格處理
+pandas>=1.5.0
+tabula-py>=2.5.0

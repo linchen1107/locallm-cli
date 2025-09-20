@@ -34,8 +34,8 @@ def main():
         parser = argparse.ArgumentParser(description="LocalLM CLI - 本地模型檔案操作工具")
         parser.add_argument(
             '--model', '-m',
-            default='llama3.2',
-            help='指定使用的模型名稱 (預設: llama3.2)'
+            default='qwen3:8b',
+            help='指定使用的模型名稱 (預設: qwen3:8b)'
         )
         
         args = parser.parse_args()
