@@ -14,6 +14,25 @@ try:
 except ImportError:
     HAS_PDF_SUPPORT = False
 
+# Office 文件相關導入（可選依賴）
+try:
+    import docx  # python-docx for Word files
+    HAS_WORD_SUPPORT = True
+except ImportError:
+    HAS_WORD_SUPPORT = False
+
+try:
+    import openpyxl  # for Excel files
+    HAS_EXCEL_SUPPORT = True
+except ImportError:
+    HAS_EXCEL_SUPPORT = False
+
+try:
+    from pptx import Presentation  # python-pptx for PowerPoint files
+    HAS_POWERPOINT_SUPPORT = True
+except ImportError:
+    HAS_POWERPOINT_SUPPORT = False
+
 
 class FileTools:
     """檔案操作工具類"""
@@ -183,6 +202,216 @@ class FileTools:
             pass  # OCR 失敗，靜默忽略
         
         return ""
+    
+    def read_word(self, file_path: str) -> str:
+        """
+        讀取 Word 檔案內容並提取文字
+        
+        Args:
+            file_path: Word 檔案路徑 (.docx)
+            
+        Returns:
+            str: 提取的文字內容
+            
+        Raises:
+            FileNotFoundError: 檔案不存在
+            ValueError: 不是 Word 檔案或讀取失敗
+            ImportError: python-docx 未安裝
+        """
+        if not HAS_WORD_SUPPORT:
+            raise ImportError("Word 支援需要安裝 python-docx。請執行: pip install python-docx")
+        
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if not resolved_path.is_file():
+            raise ValueError(f"路徑不是檔案: {resolved_path}")
+        
+        if resolved_path.suffix.lower() not in ['.docx']:
+            raise ValueError(f"檔案不是支援的 Word 格式 (.docx): {resolved_path}")
+        
+        try:
+            doc = docx.Document(str(resolved_path))
+            text_content = ""
+            
+            # 提取段落文字
+            for paragraph in doc.paragraphs:
+                text_content += paragraph.text + "\n"
+            
+            # 提取表格文字
+            for table in doc.tables:
+                text_content += "\n--- 表格 ---\n"
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        row_text.append(cell.text.strip())
+                    text_content += " | ".join(row_text) + "\n"
+                text_content += "\n"
+            
+            return text_content.strip()
+        
+        except Exception as e:
+            raise ValueError(f"Word 檔案讀取失敗: {e}")
+    
+    def read_excel(self, file_path: str, sheet_name: Optional[str] = None) -> str:
+        """
+        讀取 Excel 檔案內容並提取文字
+        
+        Args:
+            file_path: Excel 檔案路徑 (.xlsx, .xls)
+            sheet_name: 工作表名稱，如果未指定則讀取第一個工作表
+            
+        Returns:
+            str: 提取的文字內容
+            
+        Raises:
+            FileNotFoundError: 檔案不存在
+            ValueError: 不是 Excel 檔案或讀取失敗
+            ImportError: openpyxl 未安裝
+        """
+        if not HAS_EXCEL_SUPPORT:
+            raise ImportError("Excel 支援需要安裝 openpyxl。請執行: pip install openpyxl")
+        
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if not resolved_path.is_file():
+            raise ValueError(f"路徑不是檔案: {resolved_path}")
+        
+        if resolved_path.suffix.lower() not in ['.xlsx', '.xlsm']:
+            raise ValueError(f"檔案不是支援的 Excel 格式 (.xlsx, .xlsm): {resolved_path}")
+        
+        try:
+            workbook = openpyxl.load_workbook(str(resolved_path), data_only=True)
+            text_content = ""
+            
+            # 選擇工作表
+            if sheet_name:
+                if sheet_name not in workbook.sheetnames:
+                    raise ValueError(f"工作表 '{sheet_name}' 不存在。可用工作表: {workbook.sheetnames}")
+                worksheet = workbook[sheet_name]
+                text_content += f"=== 工作表：{sheet_name} ===\n\n"
+            else:
+                worksheet = workbook.active
+                if worksheet and hasattr(worksheet, 'title'):
+                    text_content += f"=== 工作表：{worksheet.title} ===\n\n"
+                else:
+                    text_content += f"=== 預設工作表 ===\n\n"
+            
+            # 提取儲存格內容
+            if worksheet and hasattr(worksheet, 'iter_rows'):
+                for row in worksheet.iter_rows(values_only=True):
+                    row_text = []
+                    for cell_value in row:
+                        if cell_value is not None:
+                            row_text.append(str(cell_value))
+                        else:
+                            row_text.append("")
+                    
+                    # 只添加非空行
+                    if any(cell.strip() for cell in row_text if cell):
+                        text_content += " | ".join(row_text) + "\n"
+            
+            # 如果有多個工作表，顯示工作表列表
+            if len(workbook.sheetnames) > 1 and worksheet:
+                worksheet_title = getattr(worksheet, 'title', '')
+                other_sheets = [name for name in workbook.sheetnames if name != worksheet_title]
+                if other_sheets:
+                    text_content += f"\n--- 其他工作表：{', '.join(other_sheets)} ---\n"
+            
+            workbook.close()
+            return text_content.strip()
+        
+        except Exception as e:
+            raise ValueError(f"Excel 檔案讀取失敗: {e}")
+    
+    def read_powerpoint(self, file_path: str) -> str:
+        """
+        讀取 PowerPoint 檔案內容並提取文字
+        
+        Args:
+            file_path: PowerPoint 檔案路徑 (.pptx)
+            
+        Returns:
+            str: 提取的文字內容
+            
+        Raises:
+            FileNotFoundError: 檔案不存在
+            ValueError: 不是 PowerPoint 檔案或讀取失敗
+            ImportError: python-pptx 未安裝
+        """
+        if not HAS_POWERPOINT_SUPPORT:
+            raise ImportError("PowerPoint 支援需要安裝 python-pptx。請執行: pip install python-pptx")
+        
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if not resolved_path.is_file():
+            raise ValueError(f"路徑不是檔案: {resolved_path}")
+        
+        if resolved_path.suffix.lower() not in ['.pptx']:
+            raise ValueError(f"檔案不是支援的 PowerPoint 格式 (.pptx): {resolved_path}")
+        
+        try:
+            presentation = Presentation(str(resolved_path))
+            text_content = ""
+            
+            # 逐張投影片提取文字
+            for slide_num, slide in enumerate(presentation.slides, 1):
+                text_content += f"=== 投影片 {slide_num} ===\n"
+                
+                # 提取投影片中的文字
+                for shape in slide.shapes:
+                    # 安全地檢查和提取文字內容
+                    try:
+                        if hasattr(shape, 'text_frame'):
+                            text_frame = getattr(shape, 'text_frame', None)
+                            if text_frame:
+                                shape_text = ""
+                                for paragraph in text_frame.paragraphs:
+                                    for run in paragraph.runs:
+                                        shape_text += run.text
+                                    shape_text += "\n"
+                                if shape_text.strip():
+                                    text_content += shape_text
+                        elif hasattr(shape, 'text'):
+                            shape_text_attr = getattr(shape, 'text', None)
+                            if shape_text_attr:
+                                shape_text = str(shape_text_attr)
+                                if shape_text.strip():
+                                    text_content += shape_text + "\n"
+                    except (AttributeError, TypeError, Exception):
+                        pass  # 忽略無法訪問文字的 shape
+                    
+                    # 如果是表格，提取表格內容
+                    try:
+                        if hasattr(shape, 'table'):
+                            table = getattr(shape, 'table', None)
+                            if table:
+                                text_content += "\n--- 表格 ---\n"
+                                for row in table.rows:
+                                    row_text = []
+                                    for cell in row.cells:
+                                        cell_text_attr = getattr(cell, 'text', "")
+                                        cell_text = str(cell_text_attr) if cell_text_attr else ""
+                                        row_text.append(cell_text.strip())
+                                    text_content += " | ".join(row_text) + "\n"
+                                text_content += "\n"
+                    except (AttributeError, TypeError, Exception):
+                        pass  # 忽略無法訪問表格的 shape
+                
+                text_content += "\n"
+            
+            return text_content.strip()
+        
+        except Exception as e:
+            raise ValueError(f"PowerPoint 檔案讀取失敗: {e}")
     
     def write_file(self, file_path: str, content: str) -> None:
         """

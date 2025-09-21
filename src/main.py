@@ -8,14 +8,19 @@ import sys
 import os
 import re
 import json
+import shutil
+import argparse
 from pathlib import Path
 from typing import List, Dict, Optional
 
-# 添加專案根目錄到 Python 路徑
-sys.path.insert(0, str(Path(__file__).parent))
+# 添加 src 目錄到 Python 路徑，這樣可以正確導入同級模組
+src_dir = Path(__file__).parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 
 from models import chat_stream, list_models, is_available
 from tools import read_file, write_file, edit_file, file_exists, list_files, get_current_path
+from tools.file_classifier import FileClassifier
 
 
 class LocalLMCLI:
@@ -40,14 +45,50 @@ class LocalLMCLI:
             previous_row = current_row
         return previous_row[-1]
     
-    def __init__(self, default_model: str = "qwen3:8b"):
+    def _validate_and_fix_model(self, model_name: str) -> str:
+        """驗證模型是否存在，如果不存在則尋找替代方案"""
+        try:
+            # 首先嘗試獲取可用模型列表
+            available_models_data = list_models()
+            if not available_models_data:
+                print(f"  ⚠ No models available in Ollama")
+                return model_name
+            
+            # 提取模型名稱列表
+            available_models = [model.get('name', '') for model in available_models_data]
+            
+            # 檢查指定的模型是否存在
+            if model_name in available_models:
+                return model_name
+            
+            # 如果 qwen3:8b 不存在，嘗試尋找替代方案
+            if model_name == "qwen3:8b":
+                alternatives = ["qwen3:latest", "qwen3", "llama3.1:8b", "gemma3:12b"]
+                for alt in alternatives:
+                    if alt in available_models:
+                        print(f"  ℹ Model '{model_name}' not found, using '{alt}' instead")
+                        return alt
+            
+            # 如果找不到替代方案，使用第一個可用的模型
+            if available_models[0]:
+                fallback = available_models[0]
+                print(f"  ℹ Model '{model_name}' not found, using '{fallback}' instead")
+                return fallback
+            
+            return model_name
+            
+        except Exception as e:
+            print(f"  ⚠ Error validating model: {e}")
+            return model_name
+    
+    def __init__(self, default_model: str = "qwen3:latest"):
         """
         初始化 CLI
         
         Args:
             default_model: 預設使用的模型名稱
         """
-        self.default_model = default_model
+        self.default_model = self._validate_and_fix_model(default_model)
         self.conversation_history: List[Dict] = []
         self.running = True
         self.exit_count = 0  # 用於處理雙重 Ctrl+C 退出
@@ -386,30 +427,64 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         """處理讀取檔案指令"""
         if not args:
             print("  ⚠ Usage: /read <file_path>")
+            print("  支援格式: .txt, .py, .md, .pdf, .docx, .xlsx, .xlsm, .pptx")
             return
         
         file_path = args[0]
+        file_ext = file_path.lower().split('.')[-1]
+        
         try:
-            # 檢查是否為 PDF 文件
-            if file_path.lower().endswith('.pdf'):
+            # 根據檔案類型選擇讀取方法
+            if file_ext == 'pdf':
                 # 導入 PDF 讀取功能
                 from tools import read_pdf
                 content = read_pdf(file_path)
                 print(f"\n  ── {file_path} (PDF) ──")
+            
+            elif file_ext == 'docx':
+                # 導入 Word 讀取功能
+                from tools.file_tools import default_file_tools
+                content = default_file_tools.read_word(file_path)
+                print(f"\n  ── {file_path} (Word) ──")
+            
+            elif file_ext in ['xlsx', 'xlsm']:
+                # 導入 Excel 讀取功能
+                from tools.file_tools import default_file_tools
+                # 如果有指定工作表名稱，可以作為第二個參數
+                sheet_name = args[1] if len(args) > 1 else None
+                content = default_file_tools.read_excel(file_path, sheet_name)
+                sheet_info = f" (工作表: {sheet_name})" if sheet_name else ""
+                print(f"\n  ── {file_path} (Excel{sheet_info}) ──")
+            
+            elif file_ext == 'pptx':
+                # 導入 PowerPoint 讀取功能
+                from tools.file_tools import default_file_tools
+                content = default_file_tools.read_powerpoint(file_path)
+                print(f"\n  ── {file_path} (PowerPoint) ──")
+            
             else:
+                # 一般文字檔案
                 content = read_file(file_path)
                 print(f"\n  ── {file_path} ──")
             
             print()
             print(content)
             print()
+            
         except FileNotFoundError:
             print(f"  ✗ File not found: {file_path}")
         except PermissionError:
             print(f"  ✗ Permission denied: {file_path}")
         except ImportError as e:
-            print(f"  ✗ PDF support not available: {e}")
-            print("  💡 Install PyMuPDF: pip install pymupdf")
+            print(f"  ✗ 缺少必要的依賴套件: {e}")
+            if 'docx' in str(e):
+                print("  💡 安裝 Word 支援: pip install python-docx")
+            elif 'openpyxl' in str(e):
+                print("  💡 安裝 Excel 支援: pip install openpyxl")
+            elif 'pptx' in str(e):
+                print("  💡 安裝 PowerPoint 支援: pip install python-pptx")
+            elif 'PyMuPDF' in str(e):
+                print("  💡 安裝 PDF 支援: pip install pymupdf")
         except Exception as e:
             print(f"  ✗ Error: {e}")
     
@@ -872,6 +947,14 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             self.handle_natural_file_operation(message)
             return
         
+        # 添加系統提示信息（僅在對話歷史為空時）
+        if not self.conversation_history:
+            system_prompt = self._get_system_prompt()
+            self.conversation_history.append({
+                "role": "system",
+                "content": system_prompt
+            })
+        
         # 添加使用者訊息到對話歷史
         self.conversation_history.append({
             "role": "user",
@@ -1043,7 +1126,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("\n")
         print("  ╭─ Commands ─────────────────────────╮")
         print("  │                                    │")
-        print("  │  /read <path>     Read file+PDF    │")
+        print("  │  /read <path>     Read files+Office │")
         print("  │  /analyze <pdf>   Deep PDF+RAG     │")
         print("  │  /ocr <pdf>       OCR scanned PDF  │")
         print("  │  /write <path>    Write file       │")  
@@ -1051,7 +1134,16 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("  │  /create <path>   Create file      │")
         print("  │  /list [dir]      List files       │")
         print("  │  /tree [dir]      Tree view        │")
+        print("  │  /classify <mode> Smart file sort  │")
         print("  │  /patch <file>    Safe code patch  │")
+        print("  │  ─────────── System Commands ──────│")
+        print("  │  /mkdir <dir>     Create directory │")
+        print("  │  /cd <dir>        Change directory │")
+        print("  │  /mv <src> <dst>  Move/rename file │")
+        print("  │  /cp <src> <dst>  Copy file        │")
+        print("  │  /rm <file>       Remove file      │")
+        print("  │  /pwd             Show path        │")
+        print("  │  ─────────── Management ───────────│")
         print("  │  /clear           Clear screen     │")
         print("  │  /bye             Clear history    │")
         print("  │  /load <model>    Reload model     │")
@@ -1060,7 +1152,6 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("  │  /save <name>     Save chat model  │")
         print("  │  /saved [cmd]     Manage saved     │")
         print("  │  /init [dir]      Create GEMINI.md │")
-        print("  │  /pwd             Show path        │")
         print("  │  /models          Show models      │")
         print("  │  /switch <name>   Switch model     │")
         print("  │  /help            This help        │")
@@ -1807,7 +1898,7 @@ Generated by LocalLM CLI on {Path().cwd()}
 ## File Operations
 
 This project can be managed using LocalLM CLI commands:
-- `/read <file>` - Read file contents
+- `/read <file>` - Read files (txt, pdf, docx, xlsx, pptx)
 - `/write <file>` - Write new files  
 - `/edit <file>` - Edit existing files
 - `/tree` - View project structure
@@ -1927,6 +2018,319 @@ This project can be managed using LocalLM CLI commands:
             except:
                 pass
     
+    def handle_classify_command(self, args: List[str]) -> None:
+        """處理檔案分類命令"""
+        if not args:
+            print("  ✗ Usage: /classify <mode> [directory] [target_directory]")
+            print()
+            print("  分類模式:")
+            print("    author   - 按作者分類檔案")
+            print("    type     - 按檔案類型分類")
+            print("    mixed    - 混合分類（作者+類型）")
+            print("    content  - 按檔案內容智能分類")
+            print("    preview  - 預覽分類結果（不移動檔案）")
+            print()
+            print("  範例:")
+            print("    /classify author                    # 當前目錄按作者分類")
+            print("    /classify type ~/Downloads          # 指定目錄按類型分類")
+            print("    /classify mixed ~/Documents ~/Sorted  # 指定來源和目標目錄")
+            print("    /classify content ./src             # 按內容智能分類")
+            print("    /classify preview author ~/Downloads   # 預覽作者分類")
+            print("    /classify preview content ./src     # 預覽內容分類")
+            return
+        
+        mode = args[0].lower()
+        directory = args[1] if len(args) > 1 else None
+        target_dir = args[2] if len(args) > 2 else None
+        
+        # 支援的模式
+        if mode not in ['author', 'type', 'mixed', 'content', 'preview']:
+            print(f"  ✗ 不支援的模式: {mode}")
+            print("  支援的模式: author, type, mixed, content, preview")
+            return
+        
+        try:
+            # 初始化文件分類器
+            classifier = FileClassifier(directory)
+            
+            # 預覽模式
+            if mode == 'preview':
+                if len(args) < 2:
+                    print("  ✗ 預覽模式需要指定分類類型")
+                    print("  Usage: /classify preview <author|type|mixed> [directory]")
+                    return
+                
+                preview_mode = args[1].lower()
+                preview_dir = args[2] if len(args) > 2 else None
+                
+                if preview_mode not in ['author', 'type', 'mixed', 'content']:
+                    print(f"  ✗ 不支援的預覽模式: {preview_mode}")
+                    return
+                
+                print(f"  🔍 預覽 {preview_mode} 分類結果...")
+                classification = classifier.preview_classification(preview_dir, preview_mode)
+                
+                if not classification:
+                    print("  ℹ 沒有找到檔案可以分類")
+                    return
+                
+                # 顯示分類摘要
+                summary = classifier.get_classification_summary(classification)
+                print()
+                print(summary)
+                
+                # 詢問是否執行分類
+                print()
+                confirm = input("  是否執行此分類？ (y/N): ").strip().lower()
+                if confirm == 'y':
+                    if preview_mode == 'author':
+                        result = classifier.classify_files_by_author(preview_dir, target_dir)
+                    elif preview_mode == 'type':
+                        result = classifier.classify_files_by_type(preview_dir, target_dir)
+                    elif preview_mode == 'mixed':
+                        result = classifier.classify_files_mixed(preview_dir, target_dir)
+                    elif preview_mode == 'content':
+                        result = classifier.classify_files_by_content(preview_dir, target_dir)
+                    print("  ✅ 分類完成！")
+                else:
+                    print("  ❌ 分類已取消")
+                
+            else:
+                # 執行分類
+                print(f"  📁 開始執行 {mode} 分類...")
+                
+                if mode == 'author':
+                    classification = classifier.classify_files_by_author(directory, target_dir)
+                elif mode == 'type':
+                    classification = classifier.classify_files_by_type(directory, target_dir)
+                elif mode == 'mixed':
+                    classification = classifier.classify_files_mixed(directory, target_dir)
+                elif mode == 'content':
+                    classification = classifier.classify_files_by_content(directory, target_dir)
+                
+                if not classification:
+                    print("  ℹ 沒有找到檔案可以分類")
+                    return
+                
+                # 顯示分類結果摘要
+                summary = classifier.get_classification_summary(classification)
+                print()
+                print(summary)
+                print("  ✅ 檔案分類完成！")
+                
+        except Exception as e:
+            print(f"  ✗ 分類失敗: {e}")
+            import traceback
+            print(f"  詳細錯誤: {traceback.format_exc()}")
+    
+    def handle_mkdir_command(self, args: List[str]) -> None:
+        """創建目錄"""
+        if not args:
+            print("  ✗ Usage: /mkdir <directory_name>")
+            print("  Example: /mkdir new_folder")
+            return
+        
+        try:
+            for dir_name in args:
+                dir_path = Path(dir_name)
+                if dir_path.exists():
+                    print(f"  ⚠ Directory already exists: {dir_path}")
+                else:
+                    dir_path.mkdir(parents=True, exist_ok=True)
+                    print(f"  ✅ Created directory: {dir_path.absolute()}")
+        except Exception as e:
+            print(f"  ✗ Failed to create directory: {e}")
+    
+    def handle_cd_command(self, args: List[str]) -> None:
+        """切換目錄"""
+        if not args:
+            # 顯示當前目錄
+            print(f"  Current: {Path.cwd()}")
+            return
+        
+        try:
+            target_dir = Path(args[0]).expanduser().resolve()
+            if target_dir.exists() and target_dir.is_dir():
+                os.chdir(target_dir)
+                print(f"  📁 Changed to: {target_dir}")
+            else:
+                print(f"  ✗ Directory not found: {target_dir}")
+        except Exception as e:
+            print(f"  ✗ Failed to change directory: {e}")
+    
+    def handle_move_command(self, args: List[str]) -> None:
+        """移動/重命名文件或目錄"""
+        if len(args) < 2:
+            print("  ✗ Usage: /mv <source> <destination>")
+            print("  Example: /mv old_file.txt new_file.txt")
+            print("  Example: /mv file.txt ~/Documents/")
+            return
+        
+        try:
+            source = Path(args[0])
+            destination = Path(args[1])
+            
+            if not source.exists():
+                print(f"  ✗ Source not found: {source}")
+                return
+            
+            # 如果目標是目錄，將源文件移動到該目錄
+            if destination.is_dir():
+                destination = destination / source.name
+            
+            shutil.move(str(source), str(destination))
+            print(f"  ✅ Moved: {source} → {destination}")
+            
+        except Exception as e:
+            print(f"  ✗ Failed to move: {e}")
+    
+    def handle_copy_command(self, args: List[str]) -> None:
+        """複製文件或目錄"""
+        if len(args) < 2:
+            print("  ✗ Usage: /cp <source> <destination>")
+            print("  Example: /cp file.txt backup.txt")
+            print("  Example: /cp -r folder/ backup_folder/")
+            return
+        
+        try:
+            recursive = False
+            start_idx = 0
+            
+            # 檢查是否有 -r 或 -R 選項
+            if args[0] in ['-r', '-R', '--recursive']:
+                recursive = True
+                start_idx = 1
+                if len(args) < 3:
+                    print("  ✗ Usage: /cp -r <source> <destination>")
+                    return
+            
+            source = Path(args[start_idx])
+            destination = Path(args[start_idx + 1])
+            
+            if not source.exists():
+                print(f"  ✗ Source not found: {source}")
+                return
+            
+            if source.is_dir() and not recursive:
+                print(f"  ✗ Use -r option to copy directories: /cp -r {source} {destination}")
+                return
+            
+            if source.is_file():
+                shutil.copy2(str(source), str(destination))
+                print(f"  ✅ Copied file: {source} → {destination}")
+            elif source.is_dir() and recursive:
+                shutil.copytree(str(source), str(destination))
+                print(f"  ✅ Copied directory: {source} → {destination}")
+                
+        except Exception as e:
+            print(f"  ✗ Failed to copy: {e}")
+    
+    def handle_remove_command(self, args: List[str]) -> None:
+        """刪除文件或目錄"""
+        if not args:
+            print("  ✗ Usage: /rm <file_or_directory>")
+            print("  Example: /rm file.txt")
+            print("  Example: /rm -r folder/")
+            print("  ⚠ Be careful! This will permanently delete files.")
+            return
+        
+        try:
+            recursive = False
+            force = False
+            files_to_remove = []
+            
+            for arg in args:
+                if arg in ['-r', '-R', '--recursive']:
+                    recursive = True
+                elif arg in ['-f', '--force']:
+                    force = True
+                else:
+                    files_to_remove.append(arg)
+            
+            if not files_to_remove:
+                print("  ✗ No files specified for removal")
+                return
+            
+            for file_path in files_to_remove:
+                path = Path(file_path)
+                
+                if not path.exists():
+                    print(f"  ⚠ Not found: {path}")
+                    continue
+                
+                # 安全確認（除非使用 -f）
+                if not force:
+                    if path.is_dir():
+                        confirm = input(f"  Remove directory '{path}' and all its contents? (y/N): ").strip().lower()
+                    else:
+                        confirm = input(f"  Remove file '{path}'? (y/N): ").strip().lower()
+                    
+                    if confirm != 'y':
+                        print(f"  ❌ Skipped: {path}")
+                        continue
+                
+                if path.is_file():
+                    path.unlink()
+                    print(f"  ✅ Removed file: {path}")
+                elif path.is_dir():
+                    if recursive:
+                        shutil.rmtree(str(path))
+                        print(f"  ✅ Removed directory: {path}")
+                    else:
+                        print(f"  ✗ Use -r option to remove directories: /rm -r {path}")
+                        
+        except Exception as e:
+            print(f"  ✗ Failed to remove: {e}")
+    
+    def _get_system_prompt(self) -> str:
+        """獲取系統提示信息，讓模型了解CLI的所有功能"""
+        current_dir = Path.cwd()
+        return f"""你正在協助用戶使用 LocalLM CLI，這是一個功能強大的本地檔案操作工具。
+
+當前工作目錄: {current_dir}
+
+可用的CLI命令包括：
+
+【檔案操作】
+- /read <path> - 讀取檔案 (支援 txt, pdf, docx, xlsx, pptx 等多種格式)
+- /write <path> - 寫入檔案
+- /edit <path> - 編輯檔案
+- /create <path> - 創建新檔案
+- /analyze <pdf> - 深度分析PDF (RAG功能)
+- /ocr <pdf> - PDF文字識別
+
+【目錄操作】
+- /list [dir] - 列出目錄內容 (別名: /ls)
+- /tree [dir] - 顯示目錄樹
+- /pwd - 顯示當前目錄
+
+【系統管理】
+- /mkdir <dir> - 創建目錄
+- /cd <dir> - 切換目錄
+- /mv <src> <dst> - 移動/重命名
+- /cp <src> <dst> - 複製 (使用 -r 可遞歸複製目錄)
+- /rm <file> - 刪除 (使用 -r 可遞歸刪除目錄)
+
+【智能分類】
+- /classify author - 按作者分類檔案
+- /classify type - 按檔案類型分類
+- /classify content - 按內容智能分類 (可識別API文檔、測試檔案、配置檔案等)
+- /classify mixed - 混合分類
+- /classify preview <mode> - 預覽分類結果
+
+【程式碼工具】
+- /patch <file> - 安全修改程式碼並自動備份
+
+【模型管理】
+- /models - 顯示可用模型
+- /switch <name> - 切換模型
+- /save <name> - 保存對話為新模型
+
+當用戶提到檔案操作、目錄管理、程式碼編輯等需求時，請主動建議使用相應的CLI命令。
+如果用戶詢問如何執行特定操作，請提供具體的命令示例。
+
+請自然地整合這些CLI功能到你的回答中，幫助用戶更有效地使用這個工具。"""
+    
     def run(self):
         """執行主程式循環"""
         self.print_banner()
@@ -1991,6 +2395,18 @@ This project can be managed using LocalLM CLI commands:
                     self.handle_model_command(args)
                 elif command == 'chat':
                     self.handle_chat_command(args[0] if args else "")
+                elif command == 'classify':
+                    self.handle_classify_command(args)
+                elif command == 'mkdir':
+                    self.handle_mkdir_command(args)
+                elif command == 'cd':
+                    self.handle_cd_command(args)
+                elif command == 'mv' or command == 'move':
+                    self.handle_move_command(args)
+                elif command == 'cp' or command == 'copy':
+                    self.handle_copy_command(args)
+                elif command == 'rm' or command == 'del':
+                    self.handle_remove_command(args)
                 else:
                     print(f"  ✗ Unknown command: {command}")
                     print("  Type /help for available commands")
@@ -2021,8 +2437,8 @@ def main():
     parser = argparse.ArgumentParser(description="LocalLM CLI - 本地模型檔案操作工具")
     parser.add_argument(
         '--model', '-m',
-        default='qwen3:8b',
-        help='指定使用的模型名稱 (預設: qwen3:8b)'
+        default='qwen3:latest',
+        help='指定使用的模型名稱 (預設: qwen3:latest)'
     )
     
     args = parser.parse_args()

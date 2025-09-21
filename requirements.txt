@@ -6,6 +6,11 @@ pyfiglet>=0.8.0
 # PDF 處理支援
 pymupdf>=1.23.0
 
+# Office 文件支援
+python-docx>=1.2.0
+openpyxl>=3.1.0
+python-pptx>=1.0.0
+
 # RAG 系統支援
 sentence-transformers>=2.2.0
 chromadb>=0.4.0
