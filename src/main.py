@@ -10,6 +10,8 @@ import re
 import json
 import shutil
 import argparse
+import threading
+import time
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -21,6 +23,45 @@ if str(src_dir) not in sys.path:
 from models import chat_stream, list_models, is_available
 from tools import read_file, write_file, edit_file, file_exists, list_files, get_current_path
 from tools.file_classifier import FileClassifier
+
+
+class ThinkingAnimation:
+    """思考動畫類"""
+    
+    def __init__(self):
+        self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.running = False
+        self.thread = None
+        self.message = "Thinking"
+    
+    def start(self, message: str = "Thinking"):
+        """開始動畫"""
+        if self.running:
+            return
+        
+        self.message = message
+        self.running = True
+        self.thread = threading.Thread(target=self._animate)
+        self.thread.daemon = True
+        self.thread.start()
+    
+    def stop(self):
+        """停止動畫"""
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        # 清除動畫行
+        print('\r' + ' ' * (len(self.message) + 10), end='', flush=True)
+        print('\r', end='', flush=True)
+    
+    def _animate(self):
+        """動畫循環"""
+        i = 0
+        while self.running:
+            spinner = self.spinner_chars[i % len(self.spinner_chars)]
+            print(f'\r  {spinner} {self.message}', end='', flush=True)
+            i += 1
+            time.sleep(0.1)
 
 
 class LocalLMCLI:
@@ -92,6 +133,7 @@ class LocalLMCLI:
         self.conversation_history: List[Dict] = []
         self.running = True
         self.exit_count = 0  # 用於處理雙重 Ctrl+C 退出
+        self.thinking_animation = ThinkingAnimation()  # 思考動畫
         
         # 工作區目錄管理
         self.workspace_config_file = Path.home() / ".locallm" / "workspaces.json"
@@ -157,21 +199,9 @@ class LocalLMCLI:
             print("                 本地模型 × 智能檔案操作")
             print()
         
-        # 簡化狀態顯示
-        status_line = "  "
-        if is_available():
-            models = list_models()
-            model_count = len(models) if models else 0
-            status_line += f"✓ Ollama ({model_count} models)"
-        else:
-            status_line += "✗ Ollama offline"
-        
-        status_line += f"  •  Model: {self.default_model}"
-        
-        # 顯示當前工作目錄的相對路徑或名稱
+        # 顯示當前工作目錄
         current_path = Path(get_current_path())
         try:
-            # 嘗試顯示相對於 home 目錄的路徑
             home_path = Path.home()
             if current_path.is_relative_to(home_path):
                 relative_path = current_path.relative_to(home_path)
@@ -181,14 +211,27 @@ class LocalLMCLI:
         except:
             display_path = current_path.name
             
-        status_line += f"  •  {display_path}"
+        print(f"  Working in: {display_path}")
+        
+        # 狀態顯示
+        status_line = "  "
+        if is_available():
+            models = list_models()
+            model_count = len(models) if models else 0
+            status_line += f"✓ Ollama ({model_count} models)"
+        else:
+            status_line += "✗ Ollama offline"
+        
+        status_line += f"  •  Model: {self.default_model}"
         print(status_line)
         print()
         
         # 簡潔的使用提示
-        print("  Commands: /read /write /edit /create /list /tree /patch /clear /bye /load /dir /restore /save /saved /init /models /switch /help /exit")
-        print("  或直接對話提問，例如: '請撰寫一個 hello.txt'")
-        print("  快捷鍵: Ctrl+D 清除對話歷史")
+        print("  Tips for getting started:")
+        print("  1. Ask questions, edit files, or run commands naturally.")
+        print("  2. Be specific for the best results (e.g., 'read 開發問題.txt').")
+        print("  3. Use natural language: 'create a Python script' or 'analyze this file'.")
+        print("  4. /help for more information and commands.")
         print()
     
     def parse_command(self, input_text: str) -> tuple:
@@ -967,6 +1010,15 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         # 使用流式輸出
         assistant_response = ""
         try:
+            # 開始思考動畫
+            self.thinking_animation.start("Thinking")
+            
+            # 等待一小段時間讓動畫顯示
+            time.sleep(0.5)
+            
+            # 停止動畫並開始流式輸出
+            self.thinking_animation.stop()
+            
             for chunk in chat_stream(self.default_model, self.conversation_history):
                 print(chunk, end='', flush=True)
                 assistant_response += chunk
@@ -981,18 +1033,33 @@ TEMPLATE \"\"\"{template_content}\"\"\"
                 })
                 
         except KeyboardInterrupt:
+            self.thinking_animation.stop()
             print("\n  ⚠ Interrupted\n")
         except Exception as e:
+            self.thinking_animation.stop()
             print(f"\n  ✗ Error: {e}\n")
     
     def should_use_file_tools(self, message: str) -> bool:
         """判斷是否應該使用檔案工具"""
         file_keywords = [
-            '讀取', '讀', 'read', '檔案內容',
-            '寫入', '寫', 'write', '建立檔案', '創建檔案', '新增檔案',
-            '編輯', 'edit', '修改檔案',
-            '分析檔案', '查看檔案', '顯示檔案',
-            '撰寫', '產生', 'generate', 'create', '製作'
+            # 讀取相關
+            '讀取', '讀', 'read', '檔案內容', '查看', '顯示', '打開', '開啟',
+            '分析', '總結', '重點', '條列', '列出', '數個', '大重點',
+            
+            # 寫入相關
+            '寫入', '寫', 'write', '建立檔案', '創建檔案', '新增檔案', '製作',
+            '撰寫', '產生', 'generate', 'create', '創建', '建立', '新增',
+            
+            # 編輯相關
+            '編輯', 'edit', '修改檔案', '更改', '更新', '修改',
+            
+            # 文件操作
+            '檔案', '文件', '文件夾', '資料夾', '目錄', '資料',
+            'txt', 'py', 'md', 'json', 'html', 'css', 'js',
+            
+            # 自然語言模式
+            '這個檔案', '這個文件', '那個檔案', '那個文件',
+            '檔案名', '文件名', '檔名', '文名'
         ]
         
         message_lower = message.lower()
@@ -1000,45 +1067,135 @@ TEMPLATE \"\"\"{template_content}\"\"\"
     
     def handle_natural_file_operation(self, message: str) -> None:
         """處理自然語言的檔案操作請求"""
-        # 簡單的檔案路徑提取
-        # 這裡可以使用更複雜的 NLP 技術，但為了 MVP 保持簡單
-        
-        # 尋找檔案路徑模式
         import re
-        path_patterns = [
-            r'([a-zA-Z]:[\\\/][^"\s]+)',  # Windows 絕對路徑
-            r'([\.\/][^"\s]+\.[a-zA-Z0-9]+)',  # 相對路徑
-            r'([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9]+)',  # 簡單檔名
-        ]
         
-        found_paths = []
-        for pattern in path_patterns:
-            matches = re.findall(pattern, message)
-            found_paths.extend(matches)
+        # 改進的檔案路徑提取
+        file_path = self._extract_file_path_from_message(message)
         
-        if not found_paths:
+        if not file_path:
             print("❌ 無法從訊息中識別檔案路徑")
-            print("請使用明確的指令格式，或包含具體的檔案路徑")
+            print("💡 請嘗試以下格式:")
+            print("   • '讀取 開發問題.txt'")
+            print("   • '創建 hello.py'")
+            print("   • '查看 config.json'")
             return
-        
-        file_path = found_paths[0]  # 使用第一個找到的路徑
         
         # 判斷操作類型
         message_lower = message.lower()
         
-        if any(word in message_lower for word in ['讀取', '讀', 'read', '分析', '查看', '顯示']):
-            print(f"  → Reading {file_path}")
+        if any(word in message_lower for word in ['讀取', '讀', 'read', '分析', '查看', '顯示', '打開', '開啟', '總結', '重點', '條列']):
+            print(f"  📖 正在讀取: {file_path}")
             self.handle_read_command([file_path])
+            
+            # 如果是分析請求，提供額外的AI分析
+            if any(word in message_lower for word in ['分析', '總結', '重點', '條列']):
+                self._provide_ai_analysis(file_path, message)
+                
         elif any(word in message_lower for word in ['撰寫', '產生', 'generate', 'create', '製作', '建立', '創建', '新增']):
-            print(f"  → Creating {file_path}")
+            print(f"  ✏️  正在創建: {file_path}")
             self.handle_file_creation_request(file_path, message)
-        elif any(word in message_lower for word in ['寫入', '寫', 'write', '編輯', 'edit', '修改']):
-            print(f"  → Writing to {file_path}")
-            # 對於寫入操作，我們需要從訊息中提取內容
+        elif any(word in message_lower for word in ['寫入', '寫', 'write', '編輯', 'edit', '修改', '更改', '更新']):
+            print(f"  ✏️  正在寫入: {file_path}")
             self.handle_write_from_message(file_path, message)
         else:
-            print("  ⚠ Unable to determine file operation")
-            print("  Please use explicit commands")
+            print("  ⚠ 無法確定檔案操作類型")
+            print("  💡 請明確說明要執行的操作")
+    
+    def _extract_file_path_from_message(self, message: str) -> str:
+        """從訊息中提取檔案路徑"""
+        import re
+        
+        # 移除引號
+        message = message.replace('"', '').replace("'", '')
+        
+        # 多種檔案路徑模式
+        patterns = [
+            # 引號包圍的檔案名
+            r'["\']([^"\']+\.[a-zA-Z0-9]+)["\']',
+            # 中文描述後的檔案名（支持中文檔名）
+            r'(?:讀取|讀|查看|顯示|分析|創建|建立|撰寫|寫入|編輯|修改)\s+([a-zA-Z0-9_\-\.\u4e00-\u9fff]+\.(?:txt|py|md|json|html|css|js|docx|pdf|xlsx|pptx))',
+            # 檔案名在句末（支持中文檔名）
+            r'([a-zA-Z0-9_\-\.\u4e00-\u9fff]+\.(?:txt|py|md|json|html|css|js|docx|pdf|xlsx|pptx))(?:\s|$|，|。|！|？)',
+            # 簡單的檔案名模式（支持中文檔名）
+            r'([a-zA-Z0-9_\-\.\u4e00-\u9fff]+\.(?:txt|py|md|json|html|css|js|docx|pdf|xlsx|pptx))',
+            # Windows 絕對路徑
+            r'([a-zA-Z]:[\\\/][^"\s]+)',
+            # 相對路徑
+            r'([\.\/][^"\s]+\.[a-zA-Z0-9]+)',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, message, re.IGNORECASE)
+            if matches:
+                # 返回第一個匹配的檔案路徑
+                file_path = matches[0].strip()
+                # 檢查檔案是否存在於當前目錄
+                if self._file_exists_in_current_dir(file_path):
+                    return file_path
+                # 如果不存在，也返回路徑讓用戶知道
+                return file_path
+        
+        return None
+    
+    def _file_exists_in_current_dir(self, file_path: str) -> bool:
+        """檢查檔案是否存在於當前目錄"""
+        try:
+            current_dir = Path.cwd()
+            full_path = current_dir / file_path
+            return full_path.exists() and full_path.is_file()
+        except:
+            return False
+    
+    def _provide_ai_analysis(self, file_path: str, original_message: str) -> None:
+        """提供AI分析"""
+        try:
+            # 讀取檔案內容
+            content = read_file(file_path)
+            if not content.strip():
+                print("  ⚠ 檔案內容為空")
+                return
+            
+            # 準備分析提示
+            analysis_prompt = f"""請分析以下檔案內容，並根據用戶的要求提供分析：
+
+檔案名稱: {file_path}
+用戶要求: {original_message}
+
+檔案內容:
+{content[:2000]}  # 限制內容長度避免過長
+
+請提供簡潔的分析結果，包括：
+1. 主要內容概述
+2. 重要重點或問題
+3. 具體建議（如適用）
+
+請用繁體中文回答。"""
+            
+            # 使用AI進行分析
+            messages = [{"role": "user", "content": analysis_prompt}]
+            
+            print(f"\n  🤖 AI 分析結果:")
+            print("  " + "─" * 50)
+            
+            # 開始思考動畫
+            self.thinking_animation.start("Analyzing")
+            
+            # 等待一小段時間讓動畫顯示
+            time.sleep(0.3)
+            
+            # 停止動畫並開始流式輸出
+            self.thinking_animation.stop()
+            
+            analysis_response = ""
+            for chunk in chat_stream(self.default_model, messages):
+                print(chunk, end='', flush=True)
+                analysis_response += chunk
+            
+            print("\n  " + "─" * 50)
+            
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"\n  ⚠ AI 分析失敗: {e}")
     
     def handle_file_creation_request(self, file_path: str, original_message: str) -> None:
         """處理檔案創建請求，使用 AI 生成內容"""
@@ -1069,6 +1226,15 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             
             print(f"  {self.default_model} ›")
             print()
+            
+            # 開始思考動畫
+            self.thinking_animation.start("Creating")
+            
+            # 等待一小段時間讓動畫顯示
+            time.sleep(0.3)
+            
+            # 停止動畫並開始流式輸出
+            self.thinking_animation.stop()
             
             generated_content = ""
             for chunk in chat_stream(self.default_model, messages):
@@ -1102,6 +1268,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
                 print(f"  ⚠ No content generated")
                 
         except Exception as e:
+            self.thinking_animation.stop()
             print(f"  ✗ Error generating content: {e}")
     
     def handle_write_from_message(self, file_path: str, message: str) -> None:
@@ -1123,43 +1290,37 @@ TEMPLATE \"\"\"{template_content}\"\"\"
     
     def handle_help_command(self) -> None:
         """顯示幫助資訊"""
-        print("\n")
-        print("  ╭─ Commands ─────────────────────────╮")
-        print("  │                                    │")
-        print("  │  /read <path>     Read files+Office │")
-        print("  │  /analyze <pdf>   Deep PDF+RAG     │")
-        print("  │  /ocr <pdf>       OCR scanned PDF  │")
-        print("  │  /write <path>    Write file       │")  
-        print("  │  /edit <path>     Edit file        │")
-        print("  │  /create <path>   Create file      │")
-        print("  │  /list [dir]      List files       │")
-        print("  │  /tree [dir]      Tree view        │")
-        print("  │  /classify <mode> Smart file sort  │")
-        print("  │  /patch <file>    Safe code patch  │")
-        print("  │  ─────────── System Commands ──────│")
-        print("  │  /mkdir <dir>     Create directory │")
-        print("  │  /cd <dir>        Change directory │")
-        print("  │  /mv <src> <dst>  Move/rename file │")
-        print("  │  /cp <src> <dst>  Copy file        │")
-        print("  │  /rm <file>       Remove file      │")
-        print("  │  /pwd             Show path        │")
-        print("  │  ─────────── Management ───────────│")
-        print("  │  /clear           Clear screen     │")
-        print("  │  /bye             Clear history    │")
-        print("  │  /load <model>    Reload model     │")
-        print("  │  /dir <add|show>  Workspace dirs   │")
-        print("  │  /restore [id]    Restore files    │")
-        print("  │  /save <name>     Save chat model  │")
-        print("  │  /saved [cmd]     Manage saved     │")
-        print("  │  /init [dir]      Create GEMINI.md │")
-        print("  │  /models          Show models      │")
-        print("  │  /switch <name>   Switch model     │")
-        print("  │  /help            This help        │")
-        print("  │  /exit            Exit program     │")
-        print("  │                                    │")
-        print("  │  Or just ask questions naturally   │")
-        print("  │                                    │")
-        print("  ╰────────────────────────────────────╯")
+        print("\n  📚 LocalLM CLI 命令說明")
+        print("  " + "─" * 40)
+        print()
+        print("  🔤 自然語言命令 (推薦使用):")
+        print("     • '讀取 開發問題.txt 並總結重點'")
+        print("     • '創建一個 Python 腳本'")
+        print("     • '列出當前目錄的檔案'")
+        print("     • '分析 config.json 的內容'")
+        print()
+        print("  📁 檔案操作:")
+        print("     /read <檔案>    讀取檔案內容")
+        print("     /write <檔案>   寫入檔案")
+        print("     /create <檔案>  創建新檔案")
+        print("     /list [目錄]    列出檔案")
+        print("     /tree [目錄]    樹狀顯示")
+        print()
+        print("  🛠️  系統操作:")
+        print("     /mkdir <目錄>   創建目錄")
+        print("     /cd <目錄>     切換目錄")
+        print("     /mv <來源> <目標>  移動/重命名")
+        print("     /cp <來源> <目標>  複製檔案")
+        print("     /rm <檔案>     刪除檔案")
+        print()
+        print("  ⚙️  其他功能:")
+        print("     /models         顯示可用模型")
+        print("     /switch <模型>  切換模型")
+        print("     /clear         清除畫面")
+        print("     /bye           清除對話歷史")
+        print("     /exit          退出程式")
+        print()
+        print("  💡 提示: 直接說出您的需求，AI 會自動理解並執行!")
         print()
     
     def handle_clear_command(self) -> None:
@@ -2285,51 +2446,34 @@ This project can be managed using LocalLM CLI commands:
     def _get_system_prompt(self) -> str:
         """獲取系統提示信息，讓模型了解CLI的所有功能"""
         current_dir = Path.cwd()
-        return f"""你正在協助用戶使用 LocalLM CLI，這是一個功能強大的本地檔案操作工具。
+        return f"""你是 LocalLM CLI 的智能助手，專門幫助用戶進行檔案操作。
 
 當前工作目錄: {current_dir}
 
-可用的CLI命令包括：
+🎯 你的主要任務：
+1. 理解用戶的自然語言請求
+2. 自動識別檔案操作需求
+3. 提供簡潔明確的建議
 
-【檔案操作】
-- /read <path> - 讀取檔案 (支援 txt, pdf, docx, xlsx, pptx 等多種格式)
-- /write <path> - 寫入檔案
-- /edit <path> - 編輯檔案
-- /create <path> - 創建新檔案
-- /analyze <pdf> - 深度分析PDF (RAG功能)
-- /ocr <pdf> - PDF文字識別
+📁 支援的檔案操作：
+- 讀取檔案: txt, py, md, json, html, css, js, docx, pdf, xlsx, pptx
+- 創建檔案: 根據用戶需求生成內容
+- 編輯檔案: 修改現有檔案
+- 分析檔案: 總結重點、提供建議
 
-【目錄操作】
-- /list [dir] - 列出目錄內容 (別名: /ls)
-- /tree [dir] - 顯示目錄樹
-- /pwd - 顯示當前目錄
+🔤 自然語言理解：
+當用戶說「讀取 開發問題.txt 並總結重點」時，你應該：
+1. 識別這是一個檔案讀取和分析請求
+2. 建議使用相應的CLI命令
+3. 提供具體的操作指導
 
-【系統管理】
-- /mkdir <dir> - 創建目錄
-- /cd <dir> - 切換目錄
-- /mv <src> <dst> - 移動/重命名
-- /cp <src> <dst> - 複製 (使用 -r 可遞歸複製目錄)
-- /rm <file> - 刪除 (使用 -r 可遞歸刪除目錄)
+💡 回應風格：
+- 簡潔明瞭，避免冗長說明
+- 主動提供解決方案
+- 使用繁體中文
+- 包含具體的命令示例
 
-【智能分類】
-- /classify author - 按作者分類檔案
-- /classify type - 按檔案類型分類
-- /classify content - 按內容智能分類 (可識別API文檔、測試檔案、配置檔案等)
-- /classify mixed - 混合分類
-- /classify preview <mode> - 預覽分類結果
-
-【程式碼工具】
-- /patch <file> - 安全修改程式碼並自動備份
-
-【模型管理】
-- /models - 顯示可用模型
-- /switch <name> - 切換模型
-- /save <name> - 保存對話為新模型
-
-當用戶提到檔案操作、目錄管理、程式碼編輯等需求時，請主動建議使用相應的CLI命令。
-如果用戶詢問如何執行特定操作，請提供具體的命令示例。
-
-請自然地整合這些CLI功能到你的回答中，幫助用戶更有效地使用這個工具。"""
+請幫助用戶更有效地使用這個工具，讓檔案操作變得簡單直觀。"""
     
     def run(self):
         """執行主程式循環"""

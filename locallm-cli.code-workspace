@@ -21,7 +21,23 @@
             "build",
             "dist"
         ],
-        "python.defaultInterpreterPath": "python"
+        "python.defaultInterpreterPath": "python",
+        "cursorpyright.analysis.autoImportCompletions": true,
+        "cursorpyright.analysis.autoSearchPaths": true,
+        "cursorpyright.analysis.exclude": [
+            "**/__pycache__",
+            "build",
+            "dist"
+        ],
+        "cursorpyright.analysis.extraPaths": [
+            "./src",
+            "${workspaceFolder}/src"
+        ],
+        "cursorpyright.analysis.include": [
+            "src/**",
+            "*.py"
+        ],
+        "cursorpyright.analysis.typeCheckingMode": "basic"
     },
     "extensions": {
         "recommendations": [
