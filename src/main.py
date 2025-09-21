@@ -12,6 +12,9 @@ import shutil
 import argparse
 import threading
 import time
+import readline
+import asyncio
+import concurrent.futures
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -23,6 +26,10 @@ if str(src_dir) not in sys.path:
 from models import chat_stream, list_models, is_available
 from tools import read_file, write_file, edit_file, file_exists, list_files, get_current_path
 from tools.file_classifier import FileClassifier
+from tools.git_manager import default_git_manager, default_github_auth
+from tools.data_visualizer import default_data_visualizer
+from tools.batch_processor import default_batch_processor
+from tools.encryption_tools import default_encryption_manager
 
 
 class ThinkingAnimation:
@@ -63,6 +70,86 @@ class ThinkingAnimation:
             i += 1
             time.sleep(0.1)
 
+
+class AsyncFileProcessor:
+    """異步檔案處理器"""
+    
+    def __init__(self, max_workers: int = 4):
+        self.max_workers = max_workers
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    
+    def process_large_file_async(self, file_path: str, operation: str, **kwargs):
+        """異步處理大型檔案"""
+        def _process():
+            try:
+                if operation == "read_pdf":
+                    from tools import read_pdf
+                    return read_pdf(file_path, **kwargs)
+                elif operation == "read_csv":
+                    from tools import read_csv
+                    return read_csv(file_path)
+                elif operation == "analyze_pdf":
+                    from rag import create_rag_processor
+                    rag_processor = create_rag_processor()
+                    from tools import read_pdf
+                    content = read_pdf(file_path)
+                    return rag_processor.process_pdf_text(content, file_path)
+                else:
+                    raise ValueError(f"不支援的操作: {operation}")
+            except Exception as e:
+                return f"處理失敗: {e}"
+        
+        return self.executor.submit(_process)
+    
+    def process_multiple_files_async(self, file_paths: List[str], operation: str, **kwargs):
+        """異步處理多個檔案"""
+        futures = []
+        for file_path in file_paths:
+            future = self.process_large_file_async(file_path, operation, **kwargs)
+            futures.append((file_path, future))
+        return futures
+    
+    def shutdown(self):
+        """關閉執行器"""
+        self.executor.shutdown(wait=True)
+
+
+class CommandCompleter:
+    """命令自動補全器"""
+    
+    def __init__(self):
+            self.commands = [
+                '/help', '/read', '/write', '/create', '/list', '/tree',
+                '/mkdir', '/cd', '/mv', '/cp', '/rm', '/models', '/switch',
+                '/clear', '/bye', '/exit', '/thesis', '/analyze', '/ocr',
+                '/chart', '/chart analyze', '/chart suggest', '/chart create', '/chart batch',
+                '/visualize', '/batch', '/batch read', '/batch analyze', '/batch search', '/batch replace',
+                '/gui', '/encrypt', '/decrypt', '/encrypt backup', '/encrypt batch', '/decrypt batch',
+                '/git', '/git status', '/git add', '/git commit', '/git push',
+                '/git pull', '/git log', '/git diff', '/git analyze', '/git workflow',
+                '/git config --user', '/git config --email', '/git config --show'
+            ]
+        self.file_extensions = ['.txt', '.py', '.md', '.json', '.html', '.css', '.js',
+                               '.pdf', '.docx', '.xlsx', '.xls', '.pptx', '.csv', '.sql', '.yml', '.yaml', '.toml']
+    
+    def complete(self, text, state):
+        """補全函數"""
+        if state == 0:
+            # 獲取當前目錄的文件列表
+            try:
+                files = os.listdir('.')
+                all_options = self.commands + files
+                
+                # 過濾匹配的選項
+                matches = [option for option in all_options if option.startswith(text)]
+                self.matches = matches
+            except:
+                self.matches = [cmd for cmd in self.commands if cmd.startswith(text)]
+        
+        try:
+            return self.matches[state]
+        except IndexError:
+            return None
 
 class LocalLMCLI:
     """LocalLM CLI 主程式類"""
@@ -134,6 +221,12 @@ class LocalLMCLI:
         self.running = True
         self.exit_count = 0  # 用於處理雙重 Ctrl+C 退出
         self.thinking_animation = ThinkingAnimation()  # 思考動畫
+        self.async_processor = AsyncFileProcessor()  # 異步處理器
+        self.completer = CommandCompleter()  # 命令補全器
+        
+        # 設置自動補全
+        readline.set_completer(self.completer.complete)
+        readline.parse_and_bind('tab: complete')
         
         # 工作區目錄管理
         self.workspace_config_file = Path.home() / ".locallm" / "workspaces.json"
@@ -470,7 +563,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         """處理讀取檔案指令"""
         if not args:
             print("  ⚠ Usage: /read <file_path>")
-            print("  支援格式: .txt, .py, .md, .pdf, .docx, .xlsx, .xlsm, .pptx")
+            print("  支援格式: .txt, .py, .md, .pdf, .docx, .xlsx, .xlsm, .pptx, .csv, .sql, .yml, .yaml, .toml")
             return
         
         file_path = args[0]
@@ -481,7 +574,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             if file_ext == 'pdf':
                 # 導入 PDF 讀取功能
                 from tools import read_pdf
-                content = read_pdf(file_path)
+                content = read_pdf(file_path, extract_images=True)
                 print(f"\n  ── {file_path} (PDF) ──")
             
             elif file_ext == 'docx':
@@ -505,6 +598,30 @@ TEMPLATE \"\"\"{template_content}\"\"\"
                 content = default_file_tools.read_powerpoint(file_path)
                 print(f"\n  ── {file_path} (PowerPoint) ──")
             
+            elif file_ext == 'csv':
+                # 導入 CSV 讀取功能
+                from tools import read_csv
+                content = read_csv(file_path)
+                print(f"\n  ── {file_path} (CSV) ──")
+            
+            elif file_ext in ['yml', 'yaml']:
+                # 導入 YAML 讀取功能
+                from tools import read_yaml
+                content = read_yaml(file_path)
+                print(f"\n  ── {file_path} (YAML) ──")
+            
+            elif file_ext == 'toml':
+                # 導入 TOML 讀取功能
+                from tools import read_toml
+                content = read_toml(file_path)
+                print(f"\n  ── {file_path} (TOML) ──")
+            
+            elif file_ext == 'sql':
+                # 導入 SQL 讀取功能
+                from tools import read_sql
+                content = read_sql(file_path)
+                print(f"\n  ── {file_path} (SQL) ──")
+            
             else:
                 # 一般文字檔案
                 content = read_file(file_path)
@@ -513,6 +630,9 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             print()
             print(content)
             print()
+            
+            # 自動提供進階分析
+            self._provide_advanced_analysis(file_path, content, file_ext)
             
         except FileNotFoundError:
             print(f"  ✗ File not found: {file_path}")
@@ -528,8 +648,1594 @@ TEMPLATE \"\"\"{template_content}\"\"\"
                 print("  💡 安裝 PowerPoint 支援: pip install python-pptx")
             elif 'PyMuPDF' in str(e):
                 print("  💡 安裝 PDF 支援: pip install pymupdf")
+            elif 'yaml' in str(e):
+                print("  💡 安裝 YAML 支援: pip install pyyaml")
+            elif 'toml' in str(e):
+                print("  💡 安裝 TOML 支援: pip install toml")
         except Exception as e:
             print(f"  ✗ Error: {e}")
+    
+    def _provide_advanced_analysis(self, file_path: str, content: str, file_ext: str) -> None:
+        """提供進階分析：自動摘要和代碼建議"""
+        try:
+            print("  🔍 進階分析:")
+            print("  " + "─" * 40)
+            
+            # 根據文件類型提供不同的分析
+            if file_ext == 'py':
+                self._analyze_python_code(file_path, content)
+            elif file_ext in ['md', 'txt']:
+                self._analyze_text_document(file_path, content)
+            elif file_ext == 'json':
+                self._analyze_json_file(file_path, content)
+            elif file_ext == 'csv':
+                self._analyze_csv_file(file_path, content)
+            elif file_ext in ['yml', 'yaml']:
+                self._analyze_yaml_file(file_path, content)
+            elif file_ext == 'sql':
+                self._analyze_sql_file(file_path, content)
+            else:
+                self._analyze_generic_file(file_path, content)
+            
+            print("  " + "─" * 40)
+            
+        except Exception as e:
+            print(f"  ⚠ 進階分析失敗: {e}")
+    
+    def _analyze_python_code(self, file_path: str, content: str) -> None:
+        """分析 Python 代碼"""
+        lines = content.split('\n')
+        total_lines = len(lines)
+        code_lines = len([line for line in lines if line.strip() and not line.strip().startswith('#')])
+        comment_lines = len([line for line in lines if line.strip().startswith('#')])
+        
+        # 統計函數和類
+        functions = [line for line in lines if line.strip().startswith('def ')]
+        classes = [line for line in lines if line.strip().startswith('class ')]
+        imports = [line for line in lines if line.strip().startswith(('import ', 'from '))]
+        
+        print(f"  📊 代碼統計:")
+        print(f"    • 總行數: {total_lines}")
+        print(f"    • 代碼行數: {code_lines}")
+        print(f"    • 註釋行數: {comment_lines}")
+        print(f"    • 函數數量: {len(functions)}")
+        print(f"    • 類別數量: {len(classes)}")
+        print(f"    • 導入數量: {len(imports)}")
+        
+        # 代碼建議
+        suggestions = []
+        if comment_lines / max(code_lines, 1) < 0.1:
+            suggestions.append("💡 建議增加更多註釋以提高代碼可讀性")
+        if len(functions) > 10:
+            suggestions.append("💡 函數較多，建議考慮模組化重構")
+        if any('TODO' in line or 'FIXME' in line for line in lines):
+            suggestions.append("💡 發現 TODO/FIXME 標記，建議及時處理")
+        
+        if suggestions:
+            print(f"  🎯 代碼建議:")
+            for suggestion in suggestions:
+                print(f"    {suggestion}")
+    
+    def _analyze_text_document(self, file_path: str, content: str) -> None:
+        """分析文檔文件"""
+        words = content.split()
+        sentences = content.split('.')
+        paragraphs = content.split('\n\n')
+        
+        print(f"  📊 文檔統計:")
+        print(f"    • 字符數: {len(content)}")
+        print(f"    • 單詞數: {len(words)}")
+        print(f"    • 句子數: {len(sentences)}")
+        print(f"    • 段落數: {len(paragraphs)}")
+        
+        # 生成摘要
+        if len(content) > 200:
+            summary = content[:200] + "..." if len(content) > 200 else content
+            print(f"  📝 內容摘要:")
+            print(f"    {summary}")
+    
+    def _analyze_json_file(self, file_path: str, content: str) -> None:
+        """分析 JSON 文件"""
+        try:
+            import json
+            data = json.loads(content)
+            
+            if isinstance(data, dict):
+                print(f"  📊 JSON 結構:")
+                print(f"    • 類型: 物件")
+                print(f"    • 鍵數量: {len(data)}")
+                print(f"    • 主要鍵: {', '.join(list(data.keys())[:5])}")
+            elif isinstance(data, list):
+                print(f"  📊 JSON 結構:")
+                print(f"    • 類型: 陣列")
+                print(f"    • 元素數量: {len(data)}")
+                if data and isinstance(data[0], dict):
+                    print(f"    • 元素類型: 物件")
+                    print(f"    • 物件鍵: {', '.join(list(data[0].keys())[:5])}")
+            
+        except json.JSONDecodeError:
+            print(f"  ⚠ JSON 格式錯誤")
+    
+    def _analyze_csv_file(self, file_path: str, content: str) -> None:
+        """分析 CSV 文件"""
+        lines = content.split('\n')
+        if lines:
+            headers = lines[0].split(',')
+            data_rows = len([line for line in lines[1:] if line.strip()])
+            
+            print(f"  📊 CSV 結構:")
+            print(f"    • 欄位數量: {len(headers)}")
+            print(f"    • 資料行數: {data_rows}")
+            print(f"    • 欄位名稱: {', '.join(headers[:5])}")
+    
+    def _analyze_yaml_file(self, file_path: str, content: str) -> None:
+        """分析 YAML 文件"""
+        try:
+            import yaml
+            data = yaml.safe_load(content)
+            
+            if isinstance(data, dict):
+                print(f"  📊 YAML 結構:")
+                print(f"    • 類型: 物件")
+                print(f"    • 頂層鍵: {', '.join(list(data.keys())[:5])}")
+            
+        except yaml.YAMLError:
+            print(f"  ⚠ YAML 格式錯誤")
+    
+    def _analyze_sql_file(self, file_path: str, content: str) -> None:
+        """分析 SQL 文件"""
+        sql_keywords = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER']
+        found_keywords = [kw for kw in sql_keywords if kw in content.upper()]
+        
+        print(f"  📊 SQL 分析:")
+        print(f"    • 包含的 SQL 操作: {', '.join(found_keywords)}")
+        print(f"    • 語句數量: {content.count(';')}")
+    
+    def _analyze_generic_file(self, file_path: str, content: str) -> None:
+        """分析一般文件"""
+        lines = content.split('\n')
+        print(f"  📊 文件統計:")
+        print(f"    • 行數: {len(lines)}")
+        print(f"    • 字符數: {len(content)}")
+        print(f"    • 非空行數: {len([line for line in lines if line.strip()])}")
+    
+    def handle_thesis_command(self, args: List[str]) -> None:
+        """處理論文分析指令"""
+        if not args:
+            print("  ⚠ Usage: /thesis <pdf_path> [query]")
+            print("  Examples:")
+            print("    /thesis thesis/paper.pdf")
+            print("    /thesis thesis/paper.pdf '這篇論文的主要貢獻是什麼？'")
+            print("    /thesis thesis/  # 分析整個 thesis 目錄")
+            return
+        
+        pdf_path = args[0]
+        query = ' '.join(args[1:]) if len(args) > 1 else None
+        
+        try:
+            # 檢查是否為目錄
+            if os.path.isdir(pdf_path):
+                self._process_thesis_directory(pdf_path, query)
+                return
+            
+            # 檢查是否為 PDF 文件
+            if not pdf_path.lower().endswith('.pdf'):
+                print("  ⚠ 論文分析功能目前只支援 PDF 文件")
+                return
+            
+            # 檢查文件是否存在
+            if not os.path.exists(pdf_path):
+                print(f"  ✗ 文件不存在: {pdf_path}")
+                return
+            
+            # 檢查文件大小，決定是否使用異步處理
+            file_size = os.path.getsize(pdf_path)
+            use_async = file_size > 5 * 1024 * 1024  # 5MB 以上使用異步處理
+            
+            if use_async:
+                print(f"  📄 檢測到大型論文文件 ({file_size / (1024*1024):.1f}MB)，使用異步處理...")
+                self.thinking_animation.start("Processing large thesis")
+                
+                # 異步處理
+                future = self.async_processor.process_large_file_async(
+                    pdf_path, "read_pdf", extract_images=True
+                )
+                
+                # 等待完成
+                while not future.done():
+                    time.sleep(0.1)
+                
+                self.thinking_animation.stop()
+                content = future.result()
+            else:
+                # 同步處理
+                print(f"  📖 正在讀取論文: {pdf_path}")
+                from tools import read_pdf
+                content = read_pdf(pdf_path, extract_images=True)
+            
+            print(f"\n  ── {pdf_path} (論文分析) ──")
+            print()
+            print(content)
+            print()
+            
+            # 如果有查詢，進行 AI 分析
+            if query:
+                print(f"\n  🤖 論文分析結果:")
+                print("  " + "─" * 50)
+                
+                # 準備分析提示
+                analysis_prompt = f"""請分析以下學術論文內容，並回答用戶的問題：
+
+論文檔案: {pdf_path}
+用戶問題: {query}
+
+論文內容:
+{content[:3000]}  # 限制內容長度
+
+請提供專業的學術分析，包括：
+1. 論文的主要貢獻和創新點
+2. 研究方法概述
+3. 實驗結果摘要
+4. 對用戶問題的具體回答
+
+請用繁體中文回答，保持學術嚴謹性。"""
+                
+                # 使用AI進行分析
+                messages = [{"role": "user", "content": analysis_prompt}]
+                
+                self.thinking_animation.start("Analyzing thesis")
+                time.sleep(0.5)
+                self.thinking_animation.stop()
+                
+                analysis_response = ""
+                for chunk in chat_stream(self.default_model, messages):
+                    print(chunk, end='', flush=True)
+                    analysis_response += chunk
+                
+                print("\n  " + "─" * 50)
+            
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 論文分析失敗: {e}")
+            import traceback
+            print(f"  詳細錯誤: {traceback.format_exc()}")
+    
+    def _process_thesis_directory(self, directory_path: str, query: str = None) -> None:
+        """處理論文目錄"""
+        try:
+            pdf_files = []
+            for file in os.listdir(directory_path):
+                if file.lower().endswith('.pdf'):
+                    pdf_files.append(os.path.join(directory_path, file))
+            
+            if not pdf_files:
+                print(f"  ⚠ 目錄中沒有找到 PDF 文件: {directory_path}")
+                return
+            
+            print(f"  📚 找到 {len(pdf_files)} 篇論文:")
+            for i, pdf_file in enumerate(pdf_files, 1):
+                file_size = os.path.getsize(pdf_file) / (1024*1024)
+                print(f"    {i}. {os.path.basename(pdf_file)} ({file_size:.1f}MB)")
+            
+            print()
+            
+            if query:
+                # 批量分析
+                print(f"  🔍 正在分析所有論文以回答: 「{query}」")
+                self.thinking_animation.start("Analyzing all papers")
+                
+                # 異步處理所有文件
+                futures = self.async_processor.process_multiple_files_async(
+                    pdf_files, "read_pdf", extract_images=True
+                )
+                
+                # 等待所有完成
+                results = []
+                for file_path, future in futures:
+                    while not future.done():
+                        time.sleep(0.1)
+                    content = future.result()
+                    results.append((file_path, content))
+                
+                self.thinking_animation.stop()
+                
+                # 合併所有內容進行分析
+                combined_content = ""
+                for file_path, content in results:
+                    combined_content += f"\n=== {os.path.basename(file_path)} ===\n{content[:1000]}\n"
+                
+                # AI 分析
+                analysis_prompt = f"""請分析以下多篇學術論文，並回答用戶的問題：
+
+用戶問題: {query}
+
+論文內容摘要:
+{combined_content[:4000]}
+
+請提供綜合分析，包括：
+1. 各論文的共同主題和差異
+2. 研究方法的比較
+3. 對用戶問題的綜合回答
+4. 研究趨勢和未來方向
+
+請用繁體中文回答。"""
+                
+                messages = [{"role": "user", "content": analysis_prompt}]
+                
+                print(f"\n  🤖 綜合論文分析結果:")
+                print("  " + "─" * 50)
+                
+                self.thinking_animation.start("Generating analysis")
+                time.sleep(0.3)
+                self.thinking_animation.stop()
+                
+                analysis_response = ""
+                for chunk in chat_stream(self.default_model, messages):
+                    print(chunk, end='', flush=True)
+                    analysis_response += chunk
+                
+                print("\n  " + "─" * 50)
+            else:
+                print("  💡 使用 /thesis <目錄> <問題> 來分析所有論文")
+                
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 目錄處理失敗: {e}")
+    
+    def handle_git_command(self, args: List[str]) -> None:
+        """處理 Git 命令"""
+        if not args:
+            print("  ⚠ Usage: /git <command> [args...]")
+            print("  Examples:")
+            print("    /git status")
+            print("    /git add .")
+            print("    /git commit -m 'auto'")
+            print("    /git push origin main")
+            print("    /git config --user 'username'")
+            return
+        
+        command = args[0]
+        
+        try:
+            if command == "status":
+                result = default_git_manager.status()
+                print(f"\n{result}")
+            
+            elif command == "add":
+                files = args[1:] if len(args) > 1 else ["."]
+                result = default_git_manager.add(files)
+                print(f"\n{result}")
+            
+            elif command == "commit":
+                if len(args) > 1 and args[1] == "-m":
+                    message = args[2] if len(args) > 2 else "auto"
+                    auto_generate = (message == "auto")
+                    result = default_git_manager.commit(message, auto_generate)
+                    print(f"\n{result}")
+                else:
+                    print("  ⚠ Usage: /git commit -m <message>")
+            
+            elif command == "push":
+                remote = args[1] if len(args) > 1 else None
+                branch = args[2] if len(args) > 2 else None
+                result = default_git_manager.push(remote, branch)
+                print(f"\n{result}")
+            
+            elif command == "pull":
+                remote = args[1] if len(args) > 1 else None
+                branch = args[2] if len(args) > 2 else None
+                result = default_git_manager.pull(remote, branch)
+                print(f"\n{result}")
+            
+            elif command == "tag":
+                if len(args) > 1:
+                    tag_name = args[1]
+                    result = default_git_manager.tag(tag_name)
+                    print(f"\n{result}")
+                else:
+                    print("  ⚠ Usage: /git tag <tag_name>")
+            
+            elif command == "log":
+                count = int(args[1]) if len(args) > 1 else 10
+                result = default_git_manager.log(count)
+                print(f"\n{result}")
+            
+            elif command == "diff":
+                result = default_git_manager.diff()
+                print(f"\n{result}")
+            
+            elif command == "analyze":
+                result = default_git_manager.analyze_diff()
+                print(f"\n{result}")
+            
+            elif command == "workflow":
+                # 智能工作流程
+                self._handle_git_workflow_command(args[1:])
+            
+            elif command == "config":
+                self._handle_git_config_command(args[1:])
+            
+            else:
+                print(f"  ✗ 未知的 Git 命令: {command}")
+                print("  💡 支援的命令: status, add, commit, push, pull, tag, log, diff, analyze, workflow, config")
+        
+        except Exception as e:
+            print(f"  ✗ Git 命令執行失敗: {e}")
+    
+    def _handle_git_workflow_command(self, args: List[str]) -> None:
+        """處理智能 Git 工作流程"""
+        if not args:
+            print("  🔄 Git 智能工作流程")
+            print("  ────────────────────────────────────────")
+            print("  📋 可用工作流程:")
+            print("    /git workflow edit <檔案>  - 編輯已上傳檔案的完整流程")
+            print("    /git workflow sync        - 同步遠程變更")
+            print("    /git workflow release     - 發布新版本")
+            print("    /git workflow hotfix      - 緊急修復")
+            print("  💡 智能工作流程會自動處理: 檢查狀態 → 拉取更新 → 提交變更 → 推送")
+            return
+        
+        workflow_type = args[0].lower()
+        
+        if workflow_type == "edit":
+            if len(args) < 2:
+                print("  ⚠ Usage: /git workflow edit <檔案>")
+                return
+            file_path = args[1]
+            self._handle_edit_workflow(file_path)
+        
+        elif workflow_type == "sync":
+            self._handle_sync_workflow()
+        
+        elif workflow_type == "release":
+            version = args[1] if len(args) > 1 else None
+            self._handle_release_workflow(version)
+        
+        elif workflow_type == "hotfix":
+            if len(args) < 2:
+                print("  ⚠ Usage: /git workflow hotfix <修復描述>")
+                return
+            description = " ".join(args[1:])
+            self._handle_hotfix_workflow(description)
+        
+        else:
+            print(f"  ✗ 未知的工作流程類型: {workflow_type}")
+            print("  💡 支援的類型: edit, sync, release, hotfix")
+    
+    def _handle_edit_workflow(self, file_path: str) -> None:
+        """處理編輯已上傳檔案的完整工作流程"""
+        print(f"  🔄 開始編輯工作流程: {file_path}")
+        print("  ────────────────────────────────────────")
+        
+        try:
+            # 1. 檢查檔案是否存在
+            if not os.path.exists(file_path):
+                print(f"  ❌ 檔案不存在: {file_path}")
+                return
+            
+            # 2. 檢查 Git 狀態
+            print("  📊 步驟 1: 檢查 Git 狀態...")
+            status_result = default_git_manager.status()
+            print(f"  {status_result}")
+            
+            # 3. 拉取遠程更新
+            print("\n  📥 步驟 2: 拉取遠程更新...")
+            pull_result = default_git_manager.pull()
+            print(f"  {pull_result}")
+            
+            # 4. 檢查檔案是否有變更
+            print(f"\n  🔍 步驟 3: 檢查檔案變更...")
+            diff_result = default_git_manager.diff()
+            if file_path in diff_result:
+                print(f"  ✅ 發現 {file_path} 的變更")
+                
+                # 5. 添加變更到暫存區
+                print(f"\n  📝 步驟 4: 添加變更到暫存區...")
+                add_result = default_git_manager.add([file_path])
+                print(f"  {add_result}")
+                
+                # 6. 智能生成提交信息
+                print(f"\n  🤖 步驟 5: 智能生成提交信息...")
+                commit_result = default_git_manager.commit("auto", auto_generate=True)
+                print(f"  {commit_result}")
+                
+                # 7. 推送到遠程
+                print(f"\n  🚀 步驟 6: 推送到遠程...")
+                push_result = default_git_manager.push()
+                print(f"  {push_result}")
+                
+                print(f"\n  ✅ 編輯工作流程完成！{file_path} 已成功更新到 GitHub")
+            else:
+                print(f"  ℹ️  {file_path} 沒有變更，無需提交")
+            
+        except Exception as e:
+            print(f"  ❌ 工作流程執行失敗: {e}")
+    
+    def _handle_sync_workflow(self) -> None:
+        """處理同步工作流程"""
+        print("  🔄 開始同步工作流程")
+        print("  ────────────────────────────────────────")
+        
+        try:
+            # 1. 檢查狀態
+            print("  📊 步驟 1: 檢查 Git 狀態...")
+            status_result = default_git_manager.status()
+            print(f"  {status_result}")
+            
+            # 2. 拉取更新
+            print("\n  📥 步驟 2: 拉取遠程更新...")
+            pull_result = default_git_manager.pull()
+            print(f"  {pull_result}")
+            
+            # 3. 檢查本地變更
+            print("\n  🔍 步驟 3: 檢查本地變更...")
+            diff_result = default_git_manager.diff()
+            if "Changes not staged" in diff_result or "Untracked files" in diff_result:
+                print("  📝 發現本地變更，建議執行:")
+                print("    /git add .")
+                print("    /git commit -m 'auto'")
+                print("    /git push")
+            else:
+                print("  ✅ 本地與遠程已同步")
+            
+        except Exception as e:
+            print(f"  ❌ 同步工作流程失敗: {e}")
+    
+    def _handle_release_workflow(self, version: str = None) -> None:
+        """處理發布工作流程"""
+        if not version:
+            version = input("  🏷️  請輸入版本號 (如: v1.0.0): ").strip()
+            if not version:
+                print("  ❌ 版本號不能為空")
+                return
+        
+        print(f"  🚀 開始發布工作流程: {version}")
+        print("  ────────────────────────────────────────")
+        
+        try:
+            # 1. 確保所有變更已提交
+            print("  📊 步驟 1: 檢查未提交的變更...")
+            status_result = default_git_manager.status()
+            if "Changes not staged" in status_result or "Untracked files" in status_result:
+                print("  ⚠️  發現未提交的變更，請先提交:")
+                print("    /git add .")
+                print("    /git commit -m 'auto'")
+                return
+            
+            # 2. 創建標籤
+            print(f"\n  🏷️  步驟 2: 創建版本標籤 {version}...")
+            tag_result = default_git_manager.tag(version)
+            print(f"  {tag_result}")
+            
+            # 3. 推送到遠程
+            print(f"\n  🚀 步驟 3: 推送標籤到遠程...")
+            push_result = default_git_manager.push()
+            print(f"  {push_result}")
+            
+            print(f"\n  ✅ 版本 {version} 發布完成！")
+            
+        except Exception as e:
+            print(f"  ❌ 發布工作流程失敗: {e}")
+    
+    def _handle_hotfix_workflow(self, description: str) -> None:
+        """處理緊急修復工作流程"""
+        print(f"  🔥 開始緊急修復工作流程: {description}")
+        print("  ────────────────────────────────────────")
+        
+        try:
+            # 1. 檢查狀態
+            print("  📊 步驟 1: 檢查 Git 狀態...")
+            status_result = default_git_manager.status()
+            print(f"  {status_result}")
+            
+            # 2. 拉取更新
+            print("\n  📥 步驟 2: 拉取遠程更新...")
+            pull_result = default_git_manager.pull()
+            print(f"  {pull_result}")
+            
+            # 3. 添加所有變更
+            print("\n  📝 步驟 3: 添加所有變更...")
+            add_result = default_git_manager.add(["."])
+            print(f"  {add_result}")
+            
+            # 4. 緊急修復提交
+            print(f"\n  🚨 步驟 4: 緊急修復提交...")
+            hotfix_message = f"hotfix: {description}"
+            commit_result = default_git_manager.commit(hotfix_message)
+            print(f"  {commit_result}")
+            
+            # 5. 推送到遠程
+            print(f"\n  🚀 步驟 5: 推送到遠程...")
+            push_result = default_git_manager.push()
+            print(f"  {push_result}")
+            
+            print(f"\n  ✅ 緊急修復完成！")
+            
+        except Exception as e:
+            print(f"  ❌ 緊急修復工作流程失敗: {e}")
+    
+    def handle_chart_command(self, args: List[str]) -> None:
+        """處理圖表生成命令"""
+        if not args:
+            print("  📊 數據可視化功能")
+            print("  ────────────────────────────────────────")
+            print("  📋 可用命令:")
+            print("    /chart analyze <檔案>     - 分析數據結構")
+            print("    /chart suggest <檔案>     - 建議圖表類型")
+            print("    /chart create <檔案> <類型> - 創建圖表")
+            print("    /chart batch <檔案>       - 批量創建圖表")
+            print("    /chart interactive <檔案> <類型> - 創建互動式圖表")
+            print("  💡 支援格式: .csv, .xlsx, .xls")
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == "analyze":
+            if len(args) < 2:
+                print("  ⚠ Usage: /chart analyze <檔案>")
+                return
+            file_path = args[1]
+            self._analyze_data_structure(file_path)
+        
+        elif subcommand == "suggest":
+            if len(args) < 2:
+                print("  ⚠ Usage: /chart suggest <檔案>")
+                return
+            file_path = args[1]
+            self._suggest_charts(file_path)
+        
+        elif subcommand == "create":
+            if len(args) < 3:
+                print("  ⚠ Usage: /chart create <檔案> <圖表類型>")
+                return
+            file_path = args[1]
+            chart_type = args[2]
+            self._create_chart(file_path, chart_type)
+        
+        elif subcommand == "batch":
+            if len(args) < 2:
+                print("  ⚠ Usage: /chart batch <檔案>")
+                return
+            file_path = args[1]
+            self._batch_create_charts(file_path)
+        
+        elif subcommand == "interactive":
+            if len(args) < 3:
+                print("  ⚠ Usage: /chart interactive <檔案> <圖表類型>")
+                return
+            file_path = args[1]
+            chart_type = args[2]
+            self._create_interactive_chart(file_path, chart_type)
+        
+        else:
+            print(f"  ✗ 未知的圖表命令: {subcommand}")
+            print("  💡 支援的命令: analyze, suggest, create, batch, interactive")
+    
+    def handle_visualize_command(self, args: List[str]) -> None:
+        """處理可視化命令（簡化版）"""
+        if not args:
+            print("  📊 快速可視化")
+            print("  ────────────────────────────────────────")
+            print("  💡 用法: /visualize <檔案>")
+            print("  📋 支援格式: .csv, .xlsx, .xls")
+            print("  🎯 自動分析數據並創建最適合的圖表")
+            return
+        
+        file_path = args[0]
+        self._quick_visualize(file_path)
+    
+    def _analyze_data_structure(self, file_path: str) -> None:
+        """分析數據結構"""
+        print(f"  🔍 分析數據結構: {file_path}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_data_visualizer.check_dependencies()
+        if not deps['pandas']:
+            print("  ❌ 缺少 pandas 依賴，請安裝: pip install pandas")
+            return
+        
+        analysis = default_data_visualizer.analyze_data_structure(file_path)
+        
+        if "error" in analysis:
+            print(f"  ❌ {analysis['error']}")
+            return
+        
+        # 顯示分析結果
+        print(f"  📊 數據概覽:")
+        print(f"    形狀: {analysis['shape'][0]} 行 × {analysis['shape'][1]} 列")
+        print(f"    列名: {', '.join(analysis['columns'])}")
+        
+        print(f"\n  📈 數據類型:")
+        for col, dtype in analysis['data_types'].items():
+            print(f"    {col}: {dtype}")
+        
+        if analysis['numeric_columns']:
+            print(f"\n  🔢 數值列: {', '.join(analysis['numeric_columns'])}")
+        
+        if analysis['categorical_columns']:
+            print(f"  📝 分類列: {', '.join(analysis['categorical_columns'])}")
+        
+        if analysis['datetime_columns']:
+            print(f"  📅 時間列: {', '.join(analysis['datetime_columns'])}")
+        
+        missing = {k: v for k, v in analysis['missing_values'].items() if v > 0}
+        if missing:
+            print(f"\n  ⚠️  缺失值:")
+            for col, count in missing.items():
+                print(f"    {col}: {count} 個")
+        
+        print(f"\n  📋 樣本數據 (前3行):")
+        for i, row in enumerate(analysis['sample_data']):
+            print(f"    行 {i+1}: {row}")
+    
+    def _suggest_charts(self, file_path: str) -> None:
+        """建議圖表類型"""
+        print(f"  💡 圖表建議: {file_path}")
+        print("  ────────────────────────────────────────")
+        
+        analysis = default_data_visualizer.analyze_data_structure(file_path)
+        if "error" in analysis:
+            print(f"  ❌ {analysis['error']}")
+            return
+        
+        suggestions = default_data_visualizer.suggest_charts(analysis)
+        
+        if not suggestions:
+            print("  ℹ️  無法為此數據建議圖表類型")
+            return
+        
+        print(f"  🎯 建議的圖表類型:")
+        for i, suggestion in enumerate(suggestions, 1):
+            print(f"    {i}. {suggestion['name']} ({suggestion['type']})")
+            print(f"       描述: {suggestion['description']}")
+            print(f"       命令: /chart create {file_path} {suggestion['type']}")
+            print()
+    
+    def _create_chart(self, file_path: str, chart_type: str) -> None:
+        """創建圖表"""
+        print(f"  📊 創建圖表: {chart_type}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_data_visualizer.check_dependencies()
+        if not deps['pandas'] or not deps['matplotlib']:
+            print("  ❌ 缺少必要依賴，請安裝:")
+            print("     pip install pandas matplotlib seaborn")
+            return
+        
+        result = default_data_visualizer.create_chart(file_path, chart_type)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 圖表創建成功!")
+        print(f"  📁 保存位置: {result['save_path']}")
+        print(f"  📊 圖表類型: {result['chart_type']}")
+        
+        if 'info' in result:
+            info = result['info']
+            print(f"  📋 圖表信息:")
+            for key, value in info.items():
+                if key != 'chart_type':
+                    print(f"    {key}: {value}")
+    
+    def _batch_create_charts(self, file_path: str) -> None:
+        """批量創建圖表"""
+        print(f"  📊 批量創建圖表: {file_path}")
+        print("  ────────────────────────────────────────")
+        
+        result = default_data_visualizer.batch_create_charts(file_path)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 批量創建完成!")
+        print(f"  📊 成功創建: {result['charts_created']}/{result['total_charts']} 個圖表")
+        
+        for i, chart_result in enumerate(result['results'], 1):
+            if "success" in chart_result:
+                print(f"    {i}. ✅ {chart_result['chart_type']} - {chart_result['save_path']}")
+            else:
+                print(f"    {i}. ❌ {chart_result.get('error', '未知錯誤')}")
+    
+    def _create_interactive_chart(self, file_path: str, chart_type: str) -> None:
+        """創建互動式圖表"""
+        print(f"  📊 創建互動式圖表: {chart_type}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_data_visualizer.check_dependencies()
+        if not deps['plotly']:
+            print("  ❌ 缺少 plotly 依賴，請安裝: pip install plotly")
+            return
+        
+        result = default_data_visualizer.create_interactive_chart(file_path, chart_type)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 互動式圖表創建成功!")
+        print(f"  📁 保存位置: {result['save_path']}")
+        print(f"  🌐 在瀏覽器中打開查看互動效果")
+    
+    def _quick_visualize(self, file_path: str) -> None:
+        """快速可視化"""
+        print(f"  🚀 快速可視化: {file_path}")
+        print("  ────────────────────────────────────────")
+        
+        # 分析數據
+        analysis = default_data_visualizer.analyze_data_structure(file_path)
+        if "error" in analysis:
+            print(f"  ❌ {analysis['error']}")
+            return
+        
+        # 建議圖表
+        suggestions = default_data_visualizer.suggest_charts(analysis)
+        if not suggestions:
+            print("  ℹ️  無法為此數據建議圖表類型")
+            return
+        
+        # 創建前2個建議的圖表
+        chart_types = [s["type"] for s in suggestions[:2]]
+        
+        print(f"  🎯 自動創建 {len(chart_types)} 個圖表:")
+        for chart_type in chart_types:
+            print(f"    - {chart_type}")
+        
+        result = default_data_visualizer.batch_create_charts(file_path, chart_types)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"\n  ✅ 快速可視化完成!")
+        print(f"  📊 成功創建: {result['charts_created']}/{result['total_charts']} 個圖表")
+        
+        for chart_result in result['results']:
+            if "success" in chart_result:
+                print(f"  📁 {chart_result['save_path']}")
+    
+    def handle_batch_command(self, args: List[str]) -> None:
+        """處理批量處理命令"""
+        if not args:
+            print("  🔄 批量處理功能")
+            print("  ────────────────────────────────────────")
+            print("  📋 可用命令:")
+            print("    /batch read <目錄> [模式]     - 批量讀取文件")
+            print("    /batch analyze <目錄> [模式] - 批量分析文件")
+            print("    /batch search <目錄> <關鍵詞> - 批量搜索文件")
+            print("    /batch replace <目錄> <舊文本> <新文本> - 批量替換")
+            print("    /batch list <目錄> [模式]    - 列出文件")
+            print("  💡 模式: *.py, *.txt, *.md, *.json, *.csv 等")
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == "read":
+            if len(args) < 2:
+                print("  ⚠ Usage: /batch read <目錄> [模式]")
+                return
+            directory = args[1]
+            pattern = args[2] if len(args) > 2 else "*"
+            self._batch_read_files(directory, pattern)
+        
+        elif subcommand == "analyze":
+            if len(args) < 2:
+                print("  ⚠ Usage: /batch analyze <目錄> [模式]")
+                return
+            directory = args[1]
+            pattern = args[2] if len(args) > 2 else "*"
+            self._batch_analyze_files(directory, pattern)
+        
+        elif subcommand == "search":
+            if len(args) < 3:
+                print("  ⚠ Usage: /batch search <目錄> <關鍵詞> [模式]")
+                return
+            directory = args[1]
+            search_term = args[2]
+            pattern = args[3] if len(args) > 3 else "*"
+            self._batch_search_files(directory, search_term, pattern)
+        
+        elif subcommand == "replace":
+            if len(args) < 4:
+                print("  ⚠ Usage: /batch replace <目錄> <舊文本> <新文本> [模式]")
+                return
+            directory = args[1]
+            old_text = args[2]
+            new_text = args[3]
+            pattern = args[4] if len(args) > 4 else "*"
+            self._batch_replace_files(directory, old_text, new_text, pattern)
+        
+        elif subcommand == "list":
+            if len(args) < 2:
+                print("  ⚠ Usage: /batch list <目錄> [模式]")
+                return
+            directory = args[1]
+            pattern = args[2] if len(args) > 2 else "*"
+            self._batch_list_files(directory, pattern)
+        
+        else:
+            print(f"  ✗ 未知的批量命令: {subcommand}")
+            print("  💡 支援的命令: read, analyze, search, replace, list")
+    
+    def _batch_read_files(self, directory: str, pattern: str) -> None:
+        """批量讀取文件"""
+        print(f"  📖 批量讀取文件: {directory}")
+        print(f"  🔍 模式: {pattern}")
+        print("  ────────────────────────────────────────")
+        
+        # 獲取文件列表
+        file_paths = default_batch_processor.get_file_list(directory, pattern)
+        
+        if not file_paths:
+            print("  ℹ️  沒有找到匹配的文件")
+            return
+        
+        print(f"  📁 找到 {len(file_paths)} 個文件")
+        
+        # 批量讀取
+        result = default_batch_processor.batch_read_files(file_paths)
+        
+        # 顯示結果
+        print(f"\n  ✅ 批量讀取完成!")
+        print(f"  📊 {result['summary']}")
+        
+        # 創建報告
+        report_file = default_batch_processor.create_batch_report(result)
+        print(f"  📋 詳細報告: {report_file}")
+    
+    def _batch_analyze_files(self, directory: str, pattern: str) -> None:
+        """批量分析文件"""
+        print(f"  🔍 批量分析文件: {directory}")
+        print(f"  🔍 模式: {pattern}")
+        print("  ────────────────────────────────────────")
+        
+        # 獲取文件列表
+        file_paths = default_batch_processor.get_file_list(directory, pattern)
+        
+        if not file_paths:
+            print("  ℹ️  沒有找到匹配的文件")
+            return
+        
+        print(f"  📁 找到 {len(file_paths)} 個文件")
+        
+        # 批量分析
+        result = default_batch_processor.batch_analyze_files(file_paths)
+        
+        # 顯示結果
+        print(f"\n  ✅ 批量分析完成!")
+        print(f"  📊 {result['summary']}")
+        
+        # 顯示部分分析結果
+        print(f"\n  📋 分析結果摘要:")
+        for i, file_result in enumerate(result['results'][:5], 1):  # 只顯示前5個
+            if file_result['success']:
+                analysis = file_result['result']
+                file_name = os.path.basename(file_result['file_path'])
+                print(f"    {i}. {file_name}: {analysis.get('type', 'unknown')}")
+                if 'total_lines' in analysis:
+                    print(f"       行數: {analysis['total_lines']}")
+                elif 'characters' in analysis:
+                    print(f"       字符: {analysis['characters']}")
+        
+        # 創建報告
+        report_file = default_batch_processor.create_batch_report(result)
+        print(f"\n  📋 詳細報告: {report_file}")
+    
+    def _batch_search_files(self, directory: str, search_term: str, pattern: str) -> None:
+        """批量搜索文件"""
+        print(f"  🔍 批量搜索: {search_term}")
+        print(f"  📁 目錄: {directory}")
+        print(f"  🔍 模式: {pattern}")
+        print("  ────────────────────────────────────────")
+        
+        # 獲取文件列表
+        file_paths = default_batch_processor.get_file_list(directory, pattern)
+        
+        if not file_paths:
+            print("  ℹ️  沒有找到匹配的文件")
+            return
+        
+        print(f"  📁 找到 {len(file_paths)} 個文件")
+        
+        # 批量搜索
+        result = default_batch_processor.batch_search_files(file_paths, search_term)
+        
+        # 顯示結果
+        print(f"\n  ✅ 批量搜索完成!")
+        print(f"  📊 {result['summary']}")
+        
+        # 顯示搜索結果
+        print(f"\n  🔍 搜索結果:")
+        total_matches = 0
+        for file_result in result['results']:
+            if file_result['success'] and file_result['result']['matches'] > 0:
+                file_name = os.path.basename(file_result['file_path'])
+                matches = file_result['result']['matches']
+                total_matches += matches
+                print(f"    📄 {file_name}: {matches} 個匹配")
+                
+                # 顯示前3個匹配行
+                for line_info in file_result['result']['matching_lines'][:3]:
+                    print(f"      行 {line_info['line']}: {line_info['content'][:50]}...")
+        
+        print(f"\n  📊 總匹配數: {total_matches}")
+        
+        # 創建報告
+        report_file = default_batch_processor.create_batch_report(result)
+        print(f"  📋 詳細報告: {report_file}")
+    
+    def _batch_replace_files(self, directory: str, old_text: str, new_text: str, pattern: str) -> None:
+        """批量替換文件"""
+        print(f"  🔄 批量替換文件")
+        print(f"  📁 目錄: {directory}")
+        print(f"  🔍 模式: {pattern}")
+        print(f"  🔍 舊文本: {old_text}")
+        print(f"  🔍 新文本: {new_text}")
+        print("  ────────────────────────────────────────")
+        
+        # 獲取文件列表
+        file_paths = default_batch_processor.get_file_list(directory, pattern)
+        
+        if not file_paths:
+            print("  ℹ️  沒有找到匹配的文件")
+            return
+        
+        print(f"  📁 找到 {len(file_paths)} 個文件")
+        
+        # 確認操作
+        confirm = input("  ⚠️  此操作將修改文件內容，是否繼續? (y/N): ").strip().lower()
+        if confirm != 'y':
+            print("  ❌ 操作已取消")
+            return
+        
+        # 批量替換
+        result = default_batch_processor.batch_replace_files(file_paths, old_text, new_text)
+        
+        # 顯示結果
+        print(f"\n  ✅ 批量替換完成!")
+        print(f"  📊 {result['summary']}")
+        
+        # 顯示替換結果
+        print(f"\n  🔄 替換結果:")
+        total_replacements = 0
+        for file_result in result['results']:
+            if file_result['success'] and file_result['result']['replaced'] > 0:
+                file_name = os.path.basename(file_result['file_path'])
+                replaced = file_result['result']['replaced']
+                total_replacements += replaced
+                print(f"    📄 {file_name}: {replaced} 處替換")
+        
+        print(f"\n  📊 總替換數: {total_replacements}")
+        
+        # 創建報告
+        report_file = default_batch_processor.create_batch_report(result)
+        print(f"  📋 詳細報告: {report_file}")
+    
+    def _batch_list_files(self, directory: str, pattern: str) -> None:
+        """批量列出文件"""
+        print(f"  📋 列出文件: {directory}")
+        print(f"  🔍 模式: {pattern}")
+        print("  ────────────────────────────────────────")
+        
+        # 獲取文件列表
+        file_paths = default_batch_processor.get_file_list(directory, pattern)
+        
+        if not file_paths:
+            print("  ℹ️  沒有找到匹配的文件")
+            return
+        
+        print(f"  📁 找到 {len(file_paths)} 個文件:")
+        
+        # 按類型分組顯示
+        file_types = {}
+        for file_path in file_paths:
+            ext = os.path.splitext(file_path)[1].lower() or 'no_extension'
+            if ext not in file_types:
+                file_types[ext] = []
+            file_types[ext].append(file_path)
+        
+        for ext, files in sorted(file_types.items()):
+            print(f"\n  📂 {ext} ({len(files)} 個):")
+            for file_path in files[:10]:  # 只顯示前10個
+                file_name = os.path.basename(file_path)
+                size = os.path.getsize(file_path)
+                size_str = f"{size/1024:.1f}KB" if size < 1024*1024 else f"{size/(1024*1024):.1f}MB"
+                print(f"    📄 {file_name} ({size_str})")
+            
+            if len(files) > 10:
+                print(f"    ... 還有 {len(files) - 10} 個文件")
+    
+    def handle_gui_command(self, args: List[str]) -> None:
+        """處理 GUI 啟動命令"""
+        print("  🖥️  啟動圖形化界面...")
+        print("  ────────────────────────────────────────")
+        
+        try:
+            # 檢查 tkinter 是否可用
+            import tkinter as tk
+            from tkinter import messagebox
+            
+            # 啟動 GUI
+            from gui import LocalLMGUI
+            
+            print("  ✅ GUI 依賴檢查通過")
+            print("  🚀 正在啟動圖形化界面...")
+            
+            # 在新線程中啟動 GUI
+            import threading
+            
+            def start_gui():
+                try:
+                    app = LocalLMGUI()
+                    app.run()
+                except Exception as e:
+                    print(f"  ❌ GUI 啟動失敗: {e}")
+            
+            gui_thread = threading.Thread(target=start_gui, daemon=True)
+            gui_thread.start()
+            
+            print("  🎉 圖形化界面已啟動!")
+            print("  💡 提示: GUI 將在獨立窗口中運行")
+            
+        except ImportError as e:
+            print("  ❌ 缺少 GUI 依賴")
+            print("  💡 請確保已安裝 tkinter:")
+            print("     - Windows: tkinter 通常已內建")
+            print("     - Linux: sudo apt-get install python3-tk")
+            print("     - macOS: tkinter 通常已內建")
+        except Exception as e:
+            print(f"  ❌ GUI 啟動失敗: {e}")
+    
+    def handle_encrypt_command(self, args: List[str]) -> None:
+        """處理加密命令"""
+        if not args:
+            print("  🔐 文件加密功能")
+            print("  ────────────────────────────────────────")
+            print("  📋 可用命令:")
+            print("    /encrypt <檔案> [密碼]     - 加密文件")
+            print("    /encrypt text <文本> [密碼] - 加密文本")
+            print("    /encrypt backup <檔案> [密碼] - 創建加密備份")
+            print("    /encrypt batch <目錄> [密碼] - 批量加密")
+            print("    /encrypt list <目錄>       - 列出加密文件")
+            print("  💡 支援格式: .txt, .json, .csv, .py, .md, .xml, .yml")
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == "text":
+            if len(args) < 2:
+                print("  ⚠ Usage: /encrypt text <文本> [密碼]")
+                return
+            text = args[1]
+            password = args[2] if len(args) > 2 else None
+            self._encrypt_text(text, password)
+        
+        elif subcommand == "backup":
+            if len(args) < 2:
+                print("  ⚠ Usage: /encrypt backup <檔案> [密碼]")
+                return
+            file_path = args[1]
+            password = args[2] if len(args) > 2 else None
+            self._create_encrypted_backup(file_path, password)
+        
+        elif subcommand == "batch":
+            if len(args) < 2:
+                print("  ⚠ Usage: /encrypt batch <目錄> [密碼]")
+                return
+            directory = args[1]
+            password = args[2] if len(args) > 2 else None
+            self._batch_encrypt_files(directory, password)
+        
+        elif subcommand == "list":
+            if len(args) < 2:
+                print("  ⚠ Usage: /encrypt list <目錄>")
+                return
+            directory = args[1]
+            self._list_encrypted_files(directory)
+        
+        else:
+            # 默認為文件加密
+            file_path = args[0]
+            password = args[1] if len(args) > 1 else None
+            self._encrypt_file(file_path, password)
+    
+    def handle_decrypt_command(self, args: List[str]) -> None:
+        """處理解密命令"""
+        if not args:
+            print("  🔓 文件解密功能")
+            print("  ────────────────────────────────────────")
+            print("  📋 可用命令:")
+            print("    /decrypt <加密檔案> [密碼]     - 解密文件")
+            print("    /decrypt text <加密文本> [密碼] - 解密文本")
+            print("    /decrypt batch <目錄> [密碼]   - 批量解密")
+            print("    /decrypt verify <原檔案> <解密檔案> - 驗證完整性")
+            print("  💡 支援 .encrypted 文件")
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == "text":
+            if len(args) < 2:
+                print("  ⚠ Usage: /decrypt text <加密文本> [密碼]")
+                return
+            encrypted_text = args[1]
+            password = args[2] if len(args) > 2 else None
+            self._decrypt_text(encrypted_text, password)
+        
+        elif subcommand == "batch":
+            if len(args) < 2:
+                print("  ⚠ Usage: /decrypt batch <目錄> [密碼]")
+                return
+            directory = args[1]
+            password = args[2] if len(args) > 2 else None
+            self._batch_decrypt_files(directory, password)
+        
+        elif subcommand == "verify":
+            if len(args) < 3:
+                print("  ⚠ Usage: /decrypt verify <原檔案> <解密檔案>")
+                return
+            original_file = args[1]
+            decrypted_file = args[2]
+            self._verify_file_integrity(original_file, decrypted_file)
+        
+        else:
+            # 默認為文件解密
+            encrypted_file = args[0]
+            password = args[1] if len(args) > 1 else None
+            self._decrypt_file(encrypted_file, password)
+    
+    def _encrypt_file(self, file_path: str, password: str = None) -> None:
+        """加密文件"""
+        print(f"  🔐 加密文件: {file_path}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_encryption_manager.check_dependencies()
+        if not deps['cryptography']:
+            print("  ❌ 缺少 cryptography 依賴，請安裝: pip install cryptography")
+            return
+        
+        # 如果沒有提供密碼，提示輸入
+        if not password:
+            import getpass
+            password = getpass.getpass("  🔑 請輸入加密密碼: ")
+            if not password:
+                print("  ❌ 密碼不能為空")
+                return
+        
+        result = default_encryption_manager.encrypt_file(file_path, password)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 文件加密成功!")
+        print(f"  📁 原文件: {result['original_file']}")
+        print(f"  📁 加密文件: {result['encrypted_file']}")
+        print(f"  📊 原大小: {result['original_size']} 字節")
+        print(f"  📊 加密大小: {result['encrypted_size']} 字節")
+        print(f"  🔑 密鑰已保存: {'是' if result['key_saved'] else '否'}")
+    
+    def _decrypt_file(self, encrypted_file: str, password: str = None) -> None:
+        """解密文件"""
+        print(f"  🔓 解密文件: {encrypted_file}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_encryption_manager.check_dependencies()
+        if not deps['cryptography']:
+            print("  ❌ 缺少 cryptography 依賴，請安裝: pip install cryptography")
+            return
+        
+        # 如果沒有提供密碼，提示輸入
+        if not password:
+            import getpass
+            password = getpass.getpass("  🔑 請輸入解密密碼: ")
+            if not password:
+                print("  ❌ 密碼不能為空")
+                return
+        
+        result = default_encryption_manager.decrypt_file(encrypted_file, password)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 文件解密成功!")
+        print(f"  📁 加密文件: {result['encrypted_file']}")
+        print(f"  📁 解密文件: {result['decrypted_file']}")
+        print(f"  📊 解密大小: {result['decrypted_size']} 字節")
+    
+    def _encrypt_text(self, text: str, password: str = None) -> None:
+        """加密文本"""
+        print(f"  🔐 加密文本")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_encryption_manager.check_dependencies()
+        if not deps['cryptography']:
+            print("  ❌ 缺少 cryptography 依賴，請安裝: pip install cryptography")
+            return
+        
+        # 如果沒有提供密碼，提示輸入
+        if not password:
+            import getpass
+            password = getpass.getpass("  🔑 請輸入加密密碼: ")
+            if not password:
+                print("  ❌ 密碼不能為空")
+                return
+        
+        result = default_encryption_manager.encrypt_text(text, password)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 文本加密成功!")
+        print(f"  🔐 加密文本: {result['encrypted_text']}")
+        if result['salt']:
+            print(f"  🧂 鹽值: {result['salt']}")
+        print(f"  🔑 密鑰已保存: {'是' if result['key_saved'] else '否'}")
+    
+    def _decrypt_text(self, encrypted_text: str, password: str = None) -> None:
+        """解密文本"""
+        print(f"  🔓 解密文本")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_encryption_manager.check_dependencies()
+        if not deps['cryptography']:
+            print("  ❌ 缺少 cryptography 依賴，請安裝: pip install cryptography")
+            return
+        
+        # 如果沒有提供密碼，提示輸入
+        if not password:
+            import getpass
+            password = getpass.getpass("  🔑 請輸入解密密碼: ")
+            if not password:
+                print("  ❌ 密碼不能為空")
+                return
+        
+        result = default_encryption_manager.decrypt_text(encrypted_text, password)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 文本解密成功!")
+        print(f"  📝 解密文本: {result['decrypted_text']}")
+    
+    def _create_encrypted_backup(self, file_path: str, password: str = None) -> None:
+        """創建加密備份"""
+        print(f"  💾 創建加密備份: {file_path}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_encryption_manager.check_dependencies()
+        if not deps['cryptography']:
+            print("  ❌ 缺少 cryptography 依賴，請安裝: pip install cryptography")
+            return
+        
+        # 如果沒有提供密碼，提示輸入
+        if not password:
+            import getpass
+            password = getpass.getpass("  🔑 請輸入備份密碼: ")
+            if not password:
+                print("  ❌ 密碼不能為空")
+                return
+        
+        result = default_encryption_manager.create_encrypted_backup(file_path, password)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 加密備份創建成功!")
+        print(f"  📁 原文件: {result['original_file']}")
+        print(f"  📁 備份文件: {result['backup_path']}")
+        print(f"  📊 原大小: {result['original_size']} 字節")
+        print(f"  📊 備份大小: {result['encrypted_size']} 字節")
+        print(f"  🕒 備份時間: {result['timestamp']}")
+    
+    def _batch_encrypt_files(self, directory: str, password: str = None) -> None:
+        """批量加密文件"""
+        print(f"  🔐 批量加密文件: {directory}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_encryption_manager.check_dependencies()
+        if not deps['cryptography']:
+            print("  ❌ 缺少 cryptography 依賴，請安裝: pip install cryptography")
+            return
+        
+        # 獲取文件列表
+        file_paths = default_batch_processor.get_file_list(directory, "*")
+        if not file_paths:
+            print("  ℹ️  沒有找到文件")
+            return
+        
+        print(f"  📁 找到 {len(file_paths)} 個文件")
+        
+        # 如果沒有提供密碼，提示輸入
+        if not password:
+            import getpass
+            password = getpass.getpass("  🔑 請輸入加密密碼: ")
+            if not password:
+                print("  ❌ 密碼不能為空")
+                return
+        
+        result = default_encryption_manager.batch_encrypt_files(file_paths, password)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 批量加密完成!")
+        print(f"  📊 總文件數: {result['total_files']}")
+        print(f"  ✅ 成功: {result['successful']}")
+        print(f"  ❌ 失敗: {result['failed']}")
+        
+        # 顯示部分結果
+        print(f"\n  📋 加密結果:")
+        for file_result in result['results'][:5]:  # 只顯示前5個
+            file_name = os.path.basename(file_result['file_path'])
+            if "success" in file_result['result']:
+                print(f"    ✅ {file_name}")
+            else:
+                print(f"    ❌ {file_name}: {file_result['result'].get('error', '未知錯誤')}")
+    
+    def _batch_decrypt_files(self, directory: str, password: str = None) -> None:
+        """批量解密文件"""
+        print(f"  🔓 批量解密文件: {directory}")
+        print("  ────────────────────────────────────────")
+        
+        # 檢查依賴
+        deps = default_encryption_manager.check_dependencies()
+        if not deps['cryptography']:
+            print("  ❌ 缺少 cryptography 依賴，請安裝: pip install cryptography")
+            return
+        
+        # 獲取加密文件列表
+        encrypted_files = default_encryption_manager.list_encrypted_files(directory)
+        if not encrypted_files:
+            print("  ℹ️  沒有找到加密文件")
+            return
+        
+        print(f"  📁 找到 {len(encrypted_files)} 個加密文件")
+        
+        # 如果沒有提供密碼，提示輸入
+        if not password:
+            import getpass
+            password = getpass.getpass("  🔑 請輸入解密密碼: ")
+            if not password:
+                print("  ❌ 密碼不能為空")
+                return
+        
+        result = default_encryption_manager.batch_decrypt_files(encrypted_files, password)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  ✅ 批量解密完成!")
+        print(f"  📊 總文件數: {result['total_files']}")
+        print(f"  ✅ 成功: {result['successful']}")
+        print(f"  ❌ 失敗: {result['failed']}")
+        
+        # 顯示部分結果
+        print(f"\n  📋 解密結果:")
+        for file_result in result['results'][:5]:  # 只顯示前5個
+            file_name = os.path.basename(file_result['file_path'])
+            if "success" in file_result['result']:
+                print(f"    ✅ {file_name}")
+            else:
+                print(f"    ❌ {file_name}: {file_result['result'].get('error', '未知錯誤')}")
+    
+    def _list_encrypted_files(self, directory: str) -> None:
+        """列出加密文件"""
+        print(f"  📋 列出加密文件: {directory}")
+        print("  ────────────────────────────────────────")
+        
+        encrypted_files = default_encryption_manager.list_encrypted_files(directory)
+        
+        if not encrypted_files:
+            print("  ℹ️  沒有找到加密文件")
+            return
+        
+        print(f"  📁 找到 {len(encrypted_files)} 個加密文件:")
+        
+        for file_path in encrypted_files:
+            info = default_encryption_manager.get_encryption_info(file_path)
+            if "error" not in info:
+                file_name = os.path.basename(file_path)
+                size_mb = info['size'] / (1024 * 1024)
+                print(f"    🔐 {file_name} ({size_mb:.2f} MB)")
+                print(f"       修改時間: {info['modified_time']}")
+                print(f"       包含鹽值: {'是' if info['has_salt'] else '否'}")
+    
+    def _verify_file_integrity(self, original_file: str, decrypted_file: str) -> None:
+        """驗證文件完整性"""
+        print(f"  🔍 驗證文件完整性")
+        print("  ────────────────────────────────────────")
+        
+        result = default_encryption_manager.verify_file_integrity(original_file, decrypted_file)
+        
+        if "error" in result:
+            print(f"  ❌ {result['error']}")
+            return
+        
+        print(f"  📁 原文件: {original_file}")
+        print(f"  📁 解密文件: {decrypted_file}")
+        print(f"  🔐 原文件哈希: {result['original_hash']}")
+        print(f"  🔐 解密文件哈希: {result['decrypted_hash']}")
+        print(f"  ✅ 完整性驗證: {'通過' if result['integrity_verified'] else '失敗'}")
+    
+    def _handle_git_config_command(self, args: List[str]) -> None:
+        """處理 Git 配置命令"""
+        if not args:
+            print("  ⚠ Usage: /git config <option> [value]")
+            print("  Options:")
+            print("    --user <username>    設定 GitHub 用戶名")
+            print("    --email <email>      設定 GitHub 郵箱")
+            print("    --token <token>      設定 GitHub Token")
+            print("    --show               顯示當前配置")
+            print("    --switch <profile>   切換配置檔案")
+            print("    --logout             登出當前帳號")
+            return
+        
+        option = args[0]
+        
+        try:
+            if option == "--user":
+                if len(args) > 1:
+                    username = args[1]
+                    result = default_github_auth.set_user(username)
+                    print(f"\n{result}")
+                else:
+                    print("  ⚠ Usage: /git config --user <username>")
+            
+            elif option == "--email":
+                if len(args) > 1:
+                    email = args[1]
+                    result = default_github_auth.set_email(email)
+                    print(f"\n{result}")
+                else:
+                    print("  ⚠ Usage: /git config --email <email>")
+            
+            elif option == "--token":
+                if len(args) > 1:
+                    token = args[1]
+                    result = default_github_auth.set_token(token)
+                    print(f"\n{result}")
+                else:
+                    print("  ⚠ Usage: /git config --token <token>")
+            
+            elif option == "--show":
+                result = default_github_auth.show_config()
+                print(f"\n{result}")
+            
+            elif option == "--switch":
+                if len(args) > 1:
+                    profile_name = args[1]
+                    result = default_github_auth.switch_profile(profile_name)
+                    print(f"\n{result}")
+                else:
+                    print("  ⚠ Usage: /git config --switch <profile_name>")
+            
+            elif option == "--logout":
+                result = default_github_auth.logout()
+                print(f"\n{result}")
+            
+            else:
+                print(f"  ✗ 未知的配置選項: {option}")
+        
+        except Exception as e:
+            print(f"  ✗ Git 配置失敗: {e}")
     
     def handle_analyze_command(self, args: List[str]) -> None:
         """處理深度分析 PDF 指令"""
@@ -1056,6 +2762,10 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             # 文件操作
             '檔案', '文件', '文件夾', '資料夾', '目錄', '資料',
             'txt', 'py', 'md', 'json', 'html', 'css', 'js',
+            'pdf', 'docx', 'xlsx', 'pptx', 'csv', 'sql', 'yml', 'yaml', 'toml',
+            
+            # 論文相關
+            '論文', 'thesis', '研究', '學術', '期刊', '會議', 'paper', 'research',
             
             # 自然語言模式
             '這個檔案', '這個文件', '那個檔案', '那個文件',
@@ -1300,11 +3010,30 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("     • '分析 config.json 的內容'")
         print()
         print("  📁 檔案操作:")
-        print("     /read <檔案>    讀取檔案內容")
+        print("     /read <檔案>    讀取檔案內容 (支援: txt,py,md,pdf,docx,xlsx,pptx,csv,sql,yml,toml)")
         print("     /write <檔案>   寫入檔案")
         print("     /create <檔案>  創建新檔案")
+        print("     /edit <檔案>    編輯檔案")
         print("     /list [目錄]    列出檔案")
         print("     /tree [目錄]    樹狀顯示")
+        print("     /thesis <pdf>   論文分析 (支援圖片、數學公式)")
+        print("     /analyze <pdf> 深度 PDF 分析 (RAG)")
+        print("     /ocr <pdf>      OCR 文字識別")
+        print("     /chart analyze <檔案>  分析數據結構")
+        print("     /chart suggest <檔案>  建議圖表類型")
+        print("     /chart create <檔案> <類型>  創建圖表")
+        print("     /chart batch <檔案>  批量創建圖表")
+        print("     /visualize <檔案>  快速可視化")
+        print("     /batch read <目錄> [模式]  批量讀取文件")
+        print("     /batch analyze <目錄> [模式]  批量分析文件")
+        print("     /batch search <目錄> <關鍵詞>  批量搜索文件")
+        print("     /batch replace <目錄> <舊文本> <新文本>  批量替換")
+        print("     /gui  啟動圖形化界面")
+        print("     /encrypt <檔案> [密碼]  加密文件")
+        print("     /decrypt <加密檔案> [密碼]  解密文件")
+        print("     /encrypt backup <檔案> [密碼]  創建加密備份")
+        print("     /encrypt batch <目錄> [密碼]  批量加密")
+        print("     /decrypt batch <目錄> [密碼]  批量解密")
         print()
         print("  🛠️  系統操作:")
         print("     /mkdir <目錄>   創建目錄")
@@ -1312,6 +3041,27 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("     /mv <來源> <目標>  移動/重命名")
         print("     /cp <來源> <目標>  複製檔案")
         print("     /rm <檔案>     刪除檔案")
+        print()
+        print("  🔧 Git 集成:")
+        print("     /git status     顯示 Git 狀態")
+        print("     /git add [文件]  添加文件到暫存區")
+        print("     /git commit -m 'auto'  智能提交")
+        print("     /git push [remote] [branch]  推送到遠程")
+        print("     /git pull [remote] [branch]  從遠程拉取")
+        print("     /git log [數量]  顯示提交歷史")
+        print("     /git diff       顯示變更差異")
+        print("     /git analyze    分析 diff 並提供建議")
+        print("     /git tag <標籤>  創建標籤")
+        print("     /git workflow edit <檔案>  編輯已上傳檔案的完整流程")
+        print("     /git workflow sync  同步遠程變更")
+        print("     /git workflow release [版本]  發布新版本")
+        print("     /git workflow hotfix <描述>  緊急修復")
+        print("     /git config --user <username>  設定 GitHub 用戶名")
+        print("     /git config --email <email>  設定 GitHub 郵箱")
+        print("     /git config --token <token>  設定 GitHub Token")
+        print("     /git config --show  顯示當前配置")
+        print("     /git config --switch <profile>  切換配置檔案")
+        print("     /git config --logout  登出當前帳號")
         print()
         print("  ⚙️  其他功能:")
         print("     /models         顯示可用模型")
@@ -2519,6 +4269,22 @@ This project can be managed using LocalLM CLI commands:
                     self.handle_read_command(args)
                 elif command == 'analyze':
                     self.handle_analyze_command(args)
+                elif command == 'thesis':
+                    self.handle_thesis_command(args)
+                elif command == 'git':
+                    self.handle_git_command(args)
+                elif command == 'chart':
+                    self.handle_chart_command(args)
+                elif command == 'visualize':
+                    self.handle_visualize_command(args)
+                elif command == 'batch':
+                    self.handle_batch_command(args)
+                elif command == 'gui':
+                    self.handle_gui_command(args)
+                elif command == 'encrypt':
+                    self.handle_encrypt_command(args)
+                elif command == 'decrypt':
+                    self.handle_decrypt_command(args)
                 elif command == 'ocr':
                     self.handle_ocr_command(args)
                 elif command == 'write':

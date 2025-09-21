@@ -33,6 +33,26 @@ try:
 except ImportError:
     HAS_POWERPOINT_SUPPORT = False
 
+# 新增文件格式支援
+try:
+    import csv
+    import yaml
+    import tomllib  # Python 3.11+
+    HAS_CSV_SUPPORT = True
+    HAS_YAML_SUPPORT = True
+    HAS_TOML_SUPPORT = True
+except ImportError:
+    HAS_CSV_SUPPORT = True  # csv 是標準庫
+    HAS_YAML_SUPPORT = False
+    HAS_TOML_SUPPORT = False
+
+# SQL 文件支援
+try:
+    import sqlite3
+    HAS_SQL_SUPPORT = True
+except ImportError:
+    HAS_SQL_SUPPORT = False
+
 
 class FileTools:
     """檔案操作工具類"""
@@ -106,13 +126,14 @@ class FileTools:
                     content = f.read()
                 return content
 
-    def read_pdf(self, file_path: str, use_ocr: bool = False) -> str:
+    def read_pdf(self, file_path: str, use_ocr: bool = False, extract_images: bool = False) -> str:
         """
-        讀取 PDF 檔案內容並提取文字
+        讀取 PDF 檔案內容並提取文字，特別優化論文處理
         
         Args:
             file_path: PDF 檔案路徑
             use_ocr: 是否強制使用 OCR（適用於掃描型 PDF）
+            extract_images: 是否提取圖片信息
             
         Returns:
             str: 提取的文字內容
@@ -141,6 +162,8 @@ class FileTools:
             pdf_document = fitz.open(str(resolved_path))
             text_content = ""
             low_text_pages = []  # 記錄文字內容較少的頁面
+            image_count = 0
+            math_formula_count = 0
             
             # 逐頁提取文字
             for page_num in range(pdf_document.page_count):
@@ -161,9 +184,44 @@ class FileTools:
                         page_text = ocr_text
                         page_header += "[OCR] "
                 
+                # 檢測數學公式（簡單檢測）
+                if any(formula in page_text for formula in ['∑', '∫', '∂', '∇', '∞', 'α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'λ', 'μ', 'π', 'ρ', 'σ', 'τ', 'φ', 'χ', 'ψ', 'ω']):
+                    math_formula_count += 1
+                    page_header += "[含數學公式] "
+                
+                # 提取圖片信息
+                if extract_images:
+                    image_list = page.get_images()
+                    if image_list:
+                        image_count += len(image_list)
+                        page_header += f"[含 {len(image_list)} 張圖片] "
+                
                 text_content += page_header + page_text + "\n\n"
             
+            # 保存頁數信息
+            total_pages = pdf_document.page_count
             pdf_document.close()
+            
+            # 添加文檔摘要信息
+            summary_info = f"\n\n=== PDF 文檔摘要 ===\n"
+            summary_info += f"總頁數: {total_pages}\n"
+            summary_info += f"總文字長度: {len(text_content)} 字符\n"
+            if image_count > 0:
+                summary_info += f"圖片數量: {image_count}\n"
+            if math_formula_count > 0:
+                summary_info += f"含數學公式頁數: {math_formula_count}\n"
+            if low_text_pages:
+                summary_info += f"低文字內容頁數: {len(low_text_pages)} (頁碼: {', '.join(str(p+1) for p in low_text_pages)})\n"
+            
+            # 判斷文檔類型
+            if any(keyword in text_content.lower() for keyword in ['abstract', '摘要', 'introduction', '引言', 'conclusion', '結論', 'references', '參考文獻']):
+                summary_info += "文檔類型: 學術論文\n"
+            elif any(keyword in text_content.lower() for keyword in ['chapter', '章節', 'section', '節']):
+                summary_info += "文檔類型: 書籍/報告\n"
+            else:
+                summary_info += "文檔類型: 一般文檔\n"
+            
+            text_content += summary_info
             
             # 如果整體文字內容很少，提示可能需要 OCR
             if not text_content.strip() or len(text_content.strip()) < 100:
@@ -513,6 +571,147 @@ class FileTools:
             'is_dir': resolved_path.is_dir(),
             'extension': resolved_path.suffix
         }
+    
+    def read_csv(self, file_path: str) -> str:
+        """
+        讀取 CSV 檔案內容並格式化顯示
+        
+        Args:
+            file_path: CSV 檔案路徑
+            
+        Returns:
+            str: 格式化的 CSV 內容
+        """
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if resolved_path.suffix.lower() != '.csv':
+            raise ValueError(f"檔案不是 CSV 格式: {resolved_path}")
+        
+        try:
+            content = ""
+            with open(resolved_path, 'r', encoding='utf-8', newline='') as f:
+                csv_reader = csv.reader(f)
+                rows = list(csv_reader)
+                
+                if not rows:
+                    return "CSV 檔案為空"
+                
+                # 格式化顯示
+                max_widths = [max(len(str(cell)) for cell in col) for col in zip(*rows)]
+                
+                for i, row in enumerate(rows):
+                    formatted_row = []
+                    for j, cell in enumerate(row):
+                        formatted_cell = str(cell).ljust(max_widths[j] if j < len(max_widths) else 0)
+                        formatted_row.append(formatted_cell)
+                    
+                    content += " | ".join(formatted_row) + "\n"
+                    
+                    # 添加分隔線（僅在第一行後）
+                    if i == 0:
+                        separator = []
+                        for width in max_widths:
+                            separator.append("-" * width)
+                        content += " | ".join(separator) + "\n"
+            
+            return content.strip()
+            
+        except Exception as e:
+            raise ValueError(f"CSV 檔案讀取失敗: {e}")
+    
+    def read_yaml(self, file_path: str) -> str:
+        """
+        讀取 YAML 檔案內容
+        
+        Args:
+            file_path: YAML 檔案路徑
+            
+        Returns:
+            str: YAML 內容
+        """
+        if not HAS_YAML_SUPPORT:
+            raise ImportError("YAML 支援需要安裝 PyYAML。請執行: pip install pyyaml")
+        
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if resolved_path.suffix.lower() not in ['.yml', '.yaml']:
+            raise ValueError(f"檔案不是 YAML 格式: {resolved_path}")
+        
+        try:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 驗證 YAML 格式
+            yaml.safe_load(content)
+            return content
+            
+        except Exception as e:
+            raise ValueError(f"YAML 檔案讀取失敗: {e}")
+    
+    def read_toml(self, file_path: str) -> str:
+        """
+        讀取 TOML 檔案內容
+        
+        Args:
+            file_path: TOML 檔案路徑
+            
+        Returns:
+            str: TOML 內容
+        """
+        if not HAS_TOML_SUPPORT:
+            raise ImportError("TOML 支援需要 Python 3.11+ 或安裝 toml。請執行: pip install toml")
+        
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if resolved_path.suffix.lower() != '.toml':
+            raise ValueError(f"檔案不是 TOML 格式: {resolved_path}")
+        
+        try:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 驗證 TOML 格式
+            tomllib.loads(content)
+            return content
+            
+        except Exception as e:
+            raise ValueError(f"TOML 檔案讀取失敗: {e}")
+    
+    def read_sql(self, file_path: str) -> str:
+        """
+        讀取 SQL 檔案內容
+        
+        Args:
+            file_path: SQL 檔案路徑
+            
+        Returns:
+            str: SQL 內容
+        """
+        resolved_path = self._resolve_path(file_path)
+        
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"檔案不存在: {resolved_path}")
+        
+        if resolved_path.suffix.lower() != '.sql':
+            raise ValueError(f"檔案不是 SQL 格式: {resolved_path}")
+        
+        try:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            return content
+            
+        except Exception as e:
+            raise ValueError(f"SQL 檔案讀取失敗: {e}")
 
 
 # 創建預設實例
@@ -543,6 +742,22 @@ def get_current_path() -> str:
     """取得目前工作路徑"""
     return default_file_tools.get_current_path()
 
-def read_pdf(file_path: str, use_ocr: bool = False) -> str:
+def read_pdf(file_path: str, use_ocr: bool = False, extract_images: bool = False) -> str:
     """讀取 PDF 檔案內容"""
-    return default_file_tools.read_pdf(file_path, use_ocr)
+    return default_file_tools.read_pdf(file_path, use_ocr, extract_images)
+
+def read_csv(file_path: str) -> str:
+    """讀取 CSV 檔案內容"""
+    return default_file_tools.read_csv(file_path)
+
+def read_yaml(file_path: str) -> str:
+    """讀取 YAML 檔案內容"""
+    return default_file_tools.read_yaml(file_path)
+
+def read_toml(file_path: str) -> str:
+    """讀取 TOML 檔案內容"""
+    return default_file_tools.read_toml(file_path)
+
+def read_sql(file_path: str) -> str:
+    """讀取 SQL 檔案內容"""
+    return default_file_tools.read_sql(file_path)

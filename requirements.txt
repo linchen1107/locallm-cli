@@ -27,3 +27,22 @@ spacy>=3.4.0
 # 表格處理
 pandas>=1.5.0
 tabula-py>=2.5.0
+
+# 新增文件格式支援
+pyyaml>=6.0
+toml>=0.10.2
+
+# 異步處理支援
+aiofiles>=23.0.0
+
+# Git 集成支援
+GitPython>=3.1.0
+keyring>=24.0.0
+
+# 數據可視化支援
+matplotlib>=3.6.0
+seaborn>=0.12.0
+plotly>=5.15.0
+
+# 加密支援
+cryptography>=41.0.0
