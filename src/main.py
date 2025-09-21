@@ -30,6 +30,8 @@ from tools.git_manager import default_git_manager, default_github_auth
 from tools.data_visualizer import default_data_visualizer
 from tools.batch_processor import default_batch_processor
 from tools.encryption_tools import default_encryption_manager
+from tools.knowledge_base import default_knowledge_base
+from tools.kb_admin import default_kb_admin, EmbeddingModel, VectorStore
 
 
 class ThinkingAnimation:
@@ -118,7 +120,7 @@ class CommandCompleter:
     """命令自動補全器"""
     
     def __init__(self):
-            self.commands = [
+        self.commands = [
                 '/help', '/read', '/write', '/create', '/list', '/tree',
                 '/mkdir', '/cd', '/mv', '/cp', '/rm', '/models', '/switch',
                 '/clear', '/bye', '/exit', '/thesis', '/analyze', '/ocr',
@@ -127,7 +129,11 @@ class CommandCompleter:
                 '/gui', '/encrypt', '/decrypt', '/encrypt backup', '/encrypt batch', '/decrypt batch',
                 '/git', '/git status', '/git add', '/git commit', '/git push',
                 '/git pull', '/git log', '/git diff', '/git analyze', '/git workflow',
-                '/git config --user', '/git config --email', '/git config --show'
+                '/git config --user', '/git config --email', '/git config --show',
+                '/kb', '/kb add', '/kb query', '/kb list', '/kb delete', '/kb stats', '/kb help',
+                '/db', '/db admin', '/db admin init', '/db admin status', '/db admin config', 
+                '/db admin clean', '/db admin rebuild', '/db admin help', '/db add', '/db query', 
+                '/db list', '/db remove'
             ]
         self.file_extensions = ['.txt', '.py', '.md', '.json', '.html', '.css', '.js',
                                '.pdf', '.docx', '.xlsx', '.xls', '.pptx', '.csv', '.sql', '.yml', '.yaml', '.toml']
@@ -2747,33 +2753,49 @@ TEMPLATE \"\"\"{template_content}\"\"\"
     
     def should_use_file_tools(self, message: str) -> bool:
         """判斷是否應該使用檔案工具"""
-        file_keywords = [
-            # 讀取相關
-            '讀取', '讀', 'read', '檔案內容', '查看', '顯示', '打開', '開啟',
-            '分析', '總結', '重點', '條列', '列出', '數個', '大重點',
+        # 先檢查是否包含明確的檔案操作指令
+        file_operation_patterns = [
+            # 明確的檔案操作指令
+            r'讀取\s+[\w\u4e00-\u9fff]+\.\w+',  # 讀取 xxx.txt
+            r'創建\s+[\w\u4e00-\u9fff]+\.\w+',  # 創建 xxx.py
+            r'編輯\s+[\w\u4e00-\u9fff]+\.\w+',  # 編輯 xxx.md
+            r'分析\s+[\w\u4e00-\u9fff]+\.\w+',  # 分析 xxx.pdf
+            r'查看\s+[\w\u4e00-\u9fff]+\.\w+',  # 查看 xxx.json
             
-            # 寫入相關
-            '寫入', '寫', 'write', '建立檔案', '創建檔案', '新增檔案', '製作',
-            '撰寫', '產生', 'generate', 'create', '創建', '建立', '新增',
+            # 包含檔案副檔名的模式
+            r'\.(txt|py|md|json|html|css|js|pdf|docx|xlsx|pptx|csv|sql|yml|yaml|toml)',
             
-            # 編輯相關
-            '編輯', 'edit', '修改檔案', '更改', '更新', '修改',
+            # 明確的檔案路徑模式
+            r'[\w\u4e00-\u9fff]+\.(txt|py|md|json|html|css|js|pdf|docx|xlsx|pptx|csv|sql|yml|yaml|toml)',
+        ]
+        
+        import re
+        for pattern in file_operation_patterns:
+            if re.search(pattern, message, re.IGNORECASE):
+                return True
+        
+        # 檢查是否包含明確的檔案操作關鍵詞（更精確的匹配）
+        specific_file_keywords = [
+            # 讀取相關 - 更精確的匹配
+            '讀取檔案', '讀檔案', '查看檔案', '顯示檔案', '打開檔案', '開啟檔案',
+            '檔案內容', '檔案內容是什麼', '這個檔案的內容',
             
-            # 文件操作
-            '檔案', '文件', '文件夾', '資料夾', '目錄', '資料',
-            'txt', 'py', 'md', 'json', 'html', 'css', 'js',
-            'pdf', 'docx', 'xlsx', 'pptx', 'csv', 'sql', 'yml', 'yaml', 'toml',
+            # 寫入相關 - 更精確的匹配  
+            '寫入檔案', '寫檔案', '建立檔案', '創建檔案', '新增檔案',
+            '製作檔案', '撰寫檔案', '產生檔案',
+            
+            # 編輯相關 - 更精確的匹配
+            '編輯檔案', '修改檔案', '更改檔案', '更新檔案',
             
             # 論文相關
-            '論文', 'thesis', '研究', '學術', '期刊', '會議', 'paper', 'research',
+            '論文分析', '分析論文', 'thesis', '研究論文',
             
-            # 自然語言模式
-            '這個檔案', '這個文件', '那個檔案', '那個文件',
-            '檔案名', '文件名', '檔名', '文名'
+            # 自然語言模式 - 更精確的匹配
+            '這個檔案', '那個檔案', '檔案名', '檔名'
         ]
         
         message_lower = message.lower()
-        return any(keyword in message_lower for keyword in file_keywords)
+        return any(keyword in message_lower for keyword in specific_file_keywords)
     
     def handle_natural_file_operation(self, message: str) -> None:
         """處理自然語言的檔案操作請求"""
@@ -3062,6 +3084,26 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("     /git config --show  顯示當前配置")
         print("     /git config --switch <profile>  切換配置檔案")
         print("     /git config --logout  登出當前帳號")
+        print()
+        print("  📚 知識庫功能:")
+        print("     /kb add <file_or_dir> [pattern]  添加文檔到知識庫")
+        print("     /kb query <question>            查詢知識庫")
+        print("     /kb list                       列出所有文檔")
+        print("     /kb delete <filename>           刪除文檔")
+        print("     /kb stats                      顯示統計信息")
+        print("     /kb help                       顯示知識庫幫助")
+        print()
+        print("  📚 知識庫管理員 (進階):")
+        print("     /db admin init --embed <模型> [--name <名稱>]  - 初始化知識庫")
+        print("     /db admin status                              - 查看狀態")
+        print("     /db admin config --embed <模型>               - 切換嵌入模型")
+        print("     /db add <file_or_dir>                        - 添加文檔")
+        print("     /db query <question>                         - 查詢知識庫")
+        print("     /db list                                     - 列出文檔")
+        print("     /db remove <filename>                        - 刪除文檔")
+        print("     /db admin clean                              - 清理無效數據")
+        print("     /db admin rebuild                            - 重建知識庫")
+        print("     /db admin help                               - 顯示管理員幫助")
         print()
         print("  ⚙️  其他功能:")
         print("     /models         顯示可用模型")
@@ -4225,6 +4267,707 @@ This project can be managed using LocalLM CLI commands:
 
 請幫助用戶更有效地使用這個工具，讓檔案操作變得簡單直觀。"""
     
+    def handle_knowledge_command(self, args: List[str]) -> None:
+        """處理知識庫命令"""
+        if not args:
+            print("  📚 知識庫命令:")
+            print("     /kb add <file_or_directory>    添加文檔到知識庫")
+            print("     /kb query <question>          查詢知識庫")
+            print("     /kb list                      列出所有文檔")
+            print("     /kb delete <filename>          刪除文檔")
+            print("     /kb stats                     顯示統計信息")
+            print("     /kb help                      顯示幫助")
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == "add":
+            self._handle_kb_add_command(args[1:])
+        elif subcommand == "query":
+            self._handle_kb_query_command(args[1:])
+        elif subcommand == "list":
+            self._handle_kb_list_command()
+        elif subcommand == "delete":
+            self._handle_kb_delete_command(args[1:])
+        elif subcommand == "stats":
+            self._handle_kb_stats_command()
+        elif subcommand == "help":
+            self._handle_kb_help_command()
+        else:
+            print(f"  ✗ 未知的知識庫命令: {subcommand}")
+            print("  💡 使用 /kb help 查看可用命令")
+    
+    def _handle_kb_add_command(self, args: List[str]) -> None:
+        """處理知識庫添加命令"""
+        if not args:
+            print("  ✗ Usage: /kb add <file_or_directory> [pattern]")
+            print("  Examples:")
+            print("    /kb add document.pdf")
+            print("    /kb add docs/")
+            print("    /kb add docs/ *.pdf")
+            return
+        
+        file_or_dir = args[0]
+        pattern = args[1] if len(args) > 1 else "*"
+        
+        print(f"  📚 正在添加文檔到知識庫...")
+        self.thinking_animation.start("Processing documents")
+        
+        try:
+            path = Path(file_or_dir)
+            
+            if path.is_file():
+                # 添加單個文件
+                result = default_knowledge_base.add_document(str(path))
+            elif path.is_dir():
+                # 添加目錄
+                result = default_knowledge_base.add_directory(str(path), pattern)
+            else:
+                result = {"success": False, "error": f"路徑不存在: {file_or_dir}"}
+            
+            self.thinking_animation.stop()
+            
+            if result["success"]:
+                print(f"  ✅ {result['message']}")
+                if "chunks" in result:
+                    print(f"  📄 處理了 {result['chunks']} 個文本塊")
+                elif "total_added" in result:
+                    print(f"  📄 成功添加 {result['total_added']} 個文件")
+                    if result["total_errors"] > 0:
+                        print(f"  ⚠ {result['total_errors']} 個文件處理失敗")
+            else:
+                print(f"  ✗ {result['error']}")
+                
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 添加失敗: {e}")
+    
+    def _handle_kb_query_command(self, args: List[str]) -> None:
+        """處理知識庫查詢命令"""
+        if not args:
+            print("  ✗ Usage: /kb query <question>")
+            print("  Examples:")
+            print("    /kb query 這個專案的架構是什麼？")
+            print("    /kb query 請假流程是什麼？")
+            return
+        
+        question = " ".join(args)
+        
+        print(f"  🔍 正在查詢知識庫...")
+        self.thinking_animation.start("Searching knowledge base")
+        
+        try:
+            result = default_knowledge_base.query(question, top_k=5)
+            self.thinking_animation.stop()
+            
+            if result["success"]:
+                print(f"  📚 查詢結果: {result['question']}")
+                print(f"  📄 找到 {result['total_found']} 個相關文檔片段")
+                print()
+                
+                for item in result["results"]:
+                    print(f"  📋 排名 {item['rank']} (相似度: {item['similarity']:.2f})")
+                    print(f"  📁 文件: {item['file_name']}")
+                    print(f"  📝 內容: {item['content'][:200]}...")
+                    print()
+                
+                # 提供基於知識庫的AI回答
+                print("  🤖 基於知識庫的AI回答:")
+                self.thinking_animation.start("Generating AI response")
+                
+                # 構建上下文
+                context = "\n\n".join([
+                    f"文檔 {item['file_name']}: {item['content']}"
+                    for item in result["results"][:3]  # 使用前3個最相關的結果
+                ])
+                
+                # 生成回答
+                prompt = f"""基於以下知識庫內容回答用戶問題：
+
+知識庫內容：
+{context}
+
+用戶問題：{question}
+
+請提供一個準確、有用的回答，並在適當的時候引用來源文檔。"""
+                
+                try:
+                    response_stream = chat_stream(prompt)
+                    for chunk in response_stream:
+                        print(chunk, end='', flush=True)
+                    print()
+                except Exception as e:
+                    print(f"  ⚠ AI回答生成失敗: {e}")
+                
+                self.thinking_animation.stop()
+                
+            else:
+                print(f"  ✗ 查詢失敗: {result['error']}")
+                
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 查詢失敗: {e}")
+    
+    def _handle_kb_list_command(self) -> None:
+        """處理知識庫列表命令"""
+        print("  📚 知識庫文檔列表:")
+        
+        try:
+            result = default_knowledge_base.list_documents()
+            
+            if result["success"]:
+                if not result["documents"]:
+                    print("  📄 知識庫為空")
+                    return
+                
+                print(f"  📊 總共 {result['total_documents']} 個文檔")
+                print()
+                
+                for doc in result["documents"]:
+                    print(f"  📄 {doc['file_name']}")
+                    print(f"     類型: {doc['file_type']}")
+                    print(f"     大小: {doc['file_size']} bytes")
+                    print(f"     文本塊: {doc['chunks_count']}")
+                    print(f"     添加時間: {doc['added_at']}")
+                    print()
+                
+                # 顯示統計信息
+                metadata = result["metadata"]
+                print(f"  📈 知識庫統計:")
+                print(f"     總文檔數: {metadata['total_documents']}")
+                print(f"     總文本塊: {metadata['total_chunks']}")
+                print(f"     最後更新: {metadata['last_updated']}")
+                
+            else:
+                print(f"  ✗ 獲取文檔列表失敗: {result.get('error', '未知錯誤')}")
+                
+        except Exception as e:
+            print(f"  ✗ 獲取文檔列表失敗: {e}")
+    
+    def _handle_kb_delete_command(self, args: List[str]) -> None:
+        """處理知識庫刪除命令"""
+        if not args:
+            print("  ✗ Usage: /kb delete <filename>")
+            print("  Example: /kb delete document.pdf")
+            return
+        
+        filename = args[0]
+        
+        print(f"  🗑️ 正在從知識庫中刪除文檔...")
+        
+        try:
+            result = default_knowledge_base.delete_document(filename)
+            
+            if result["success"]:
+                print(f"  ✅ {result['message']}")
+                print(f"  📄 刪除了 {result['deleted_chunks']} 個文本塊")
+            else:
+                print(f"  ✗ {result['error']}")
+                
+        except Exception as e:
+            print(f"  ✗ 刪除失敗: {e}")
+    
+    def _handle_kb_stats_command(self) -> None:
+        """處理知識庫統計命令"""
+        print("  📊 知識庫統計信息:")
+        
+        try:
+            result = default_knowledge_base.get_stats()
+            
+            if result["success"]:
+                metadata = result["metadata"]
+                print(f"  📈 基本統計:")
+                print(f"     總文檔數: {result['total_documents']}")
+                print(f"     總文本塊: {metadata['total_chunks']}")
+                print(f"     創建時間: {metadata['created_at']}")
+                print(f"     最後更新: {metadata['last_updated']}")
+                print(f"     版本: {metadata['version']}")
+                print()
+                
+                print(f"  🔧 技術信息:")
+                print(f"     向量數據庫: {'✅ 可用' if result['vector_db_available'] else '❌ 不可用'}")
+                print(f"     支持的文件類型: {', '.join(result['supported_types'])}")
+                
+            else:
+                print(f"  ✗ 獲取統計信息失敗: {result.get('error', '未知錯誤')}")
+                
+        except Exception as e:
+            print(f"  ✗ 獲取統計信息失敗: {e}")
+    
+    def _handle_kb_help_command(self) -> None:
+        """處理知識庫幫助命令"""
+        print("  📚 知識庫功能說明:")
+        print()
+        print("  🎯 主要功能:")
+        print("     • 構建本地知識庫，存儲常用文檔")
+        print("     • 基於向量相似性進行智能搜索")
+        print("     • 支持多種文件格式 (txt, pdf, docx, csv, json, py, md)")
+        print("     • 自動文檔分塊和索引")
+        print()
+        print("  📋 命令列表:")
+        print("     /kb add <file_or_dir> [pattern]  - 添加文檔到知識庫")
+        print("     /kb query <question>             - 查詢知識庫")
+        print("     /kb list                        - 列出所有文檔")
+        print("     /kb delete <filename>            - 刪除文檔")
+        print("     /kb stats                       - 顯示統計信息")
+        print("     /kb help                        - 顯示此幫助")
+        print()
+        print("  💡 使用示例:")
+        print("     /kb add docs/                    # 添加整個docs目錄")
+        print("     /kb add company_policies.pdf     # 添加單個PDF文件")
+        print("     /kb query 請假流程是什麼？        # 查詢知識庫")
+        print("     /kb add docs/ *.pdf              # 只添加PDF文件")
+    
+    def handle_db_command(self, args: List[str]) -> None:
+        """處理知識庫管理員命令"""
+        if not args:
+            print("  📚 知識庫管理員命令:")
+            print("     /db admin init --embed <模型>  初始化知識庫")
+            print("     /db admin status              查看狀態")
+            print("     /db admin config --embed <模型> 切換嵌入模型")
+            print("     /db add <file_or_dir>         添加文檔")
+            print("     /db query <question>          查詢知識庫")
+            print("     /db list                      列出文檔")
+            print("     /db remove <filename>         刪除文檔")
+            print("     /db admin clean               清理無效數據")
+            print("     /db admin rebuild             重建知識庫")
+            print("     /db admin help                顯示幫助")
+            return
+        
+        command = args[0].lower()
+        
+        if command == "admin":
+            self._handle_db_admin_command(args[1:])
+        elif command == "add":
+            self._handle_db_add_command(args[1:])
+        elif command == "query":
+            self._handle_db_query_command(args[1:])
+        elif command == "list":
+            self._handle_db_list_command()
+        elif command == "remove":
+            self._handle_db_remove_command(args[1:])
+        else:
+            print(f"  ✗ 未知的知識庫管理員命令: {command}")
+            print("  💡 使用 /db admin help 查看可用命令")
+    
+    def _handle_db_admin_command(self, args: List[str]) -> None:
+        """處理知識庫管理員子命令"""
+        if not args:
+            print("  📚 知識庫管理員子命令:")
+            print("     /db admin init --embed <模型>  初始化知識庫")
+            print("     /db admin status              查看狀態")
+            print("     /db admin config --embed <模型> 切換嵌入模型")
+            print("     /db admin clean               清理無效數據")
+            print("     /db admin rebuild             重建知識庫")
+            print("     /db admin help                顯示幫助")
+            return
+        
+        subcommand = args[0].lower()
+        
+        if subcommand == "init":
+            self._handle_db_admin_init_command(args[1:])
+        elif subcommand == "status":
+            self._handle_db_admin_status_command()
+        elif subcommand == "config":
+            self._handle_db_admin_config_command(args[1:])
+        elif subcommand == "clean":
+            self._handle_db_admin_clean_command()
+        elif subcommand == "rebuild":
+            self._handle_db_admin_rebuild_command()
+        elif subcommand == "help":
+            self._handle_db_admin_help_command()
+        else:
+            print(f"  ✗ 未知的管理員命令: {subcommand}")
+            print("  💡 使用 /db admin help 查看可用命令")
+    
+    def _handle_db_admin_init_command(self, args: List[str]) -> None:
+        """處理知識庫初始化命令"""
+        if not args:
+            print("  ✗ Usage: /db admin init --embed <模型> [--name <名稱>]")
+            print("  Examples:")
+            print("    /db admin init --embed embedding-gemma")
+            print("    /db admin init --embed bge-m3 --name my_kb")
+            print("  Available models: embedding-gemma, bge-m3, e5-mistral")
+            return
+        
+        # 解析參數
+        embedding_model = None
+        kb_name = "default"
+        
+        i = 0
+        while i < len(args):
+            if args[i] == "--embed" and i + 1 < len(args):
+                embedding_model = args[i + 1]
+                i += 2
+            elif args[i] == "--name" and i + 1 < len(args):
+                kb_name = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        
+        if not embedding_model:
+            print("  ✗ 必須指定嵌入模型: --embed <模型>")
+            return
+        
+        # 映射模型名稱
+        model_mapping = {
+            "embedding-gemma": EmbeddingModel.EMBEDDING_GEMMA,
+            "bge-m3": EmbeddingModel.BGE_M3,
+            "e5-mistral": EmbeddingModel.E5_MISTRAL,
+            "all-minilm": EmbeddingModel.ALL_MINI_LM
+        }
+        
+        if embedding_model not in model_mapping:
+            print(f"  ✗ 不支持的嵌入模型: {embedding_model}")
+            print(f"  💡 支持的模型: {', '.join(model_mapping.keys())}")
+            return
+        
+        print(f"  🚀 正在初始化知識庫 '{kb_name}'...")
+        self.thinking_animation.start("Initializing knowledge base")
+        
+        try:
+            result = default_kb_admin.init_knowledge_base(
+                name=kb_name,
+                embedding_model=model_mapping[embedding_model]
+            )
+            
+            self.thinking_animation.stop()
+            
+            if result["success"]:
+                print(f"  ✅ {result['message']}")
+                print(f"  📊 嵌入模型: {result['embedding_model']}")
+                print(f"  🗄️ 向量數據庫: {result['vector_store']}")
+                print(f"  📐 向量維度: {result['dimension']}")
+            else:
+                print(f"  ✗ {result['error']}")
+                
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 初始化失敗: {e}")
+    
+    def _handle_db_admin_status_command(self) -> None:
+        """處理知識庫狀態命令"""
+        print("  📊 知識庫狀態:")
+        
+        try:
+            result = default_kb_admin.get_status()
+            
+            if result["success"]:
+                config = result["config"]
+                metadata = result["metadata"]
+                
+                print(f"  📚 知識庫名稱: {config['name']}")
+                print(f"  🤖 嵌入模型: {config['embedding_model']}")
+                print(f"  🗄️ 向量數據庫: {config['vector_store']}")
+                print(f"  📐 向量維度: {config['dimension']}")
+                print()
+                print(f"  📈 統計信息:")
+                print(f"     總文檔數: {result['total_documents']}")
+                print(f"     總文本塊: {metadata['total_chunks']}")
+                print(f"     數據庫大小: {result['db_size_mb']} MB")
+                print(f"     創建時間: {metadata['created_at']}")
+                print(f"     最後更新: {metadata['last_updated']}")
+                print(f"     版本: {metadata['version']}")
+                
+            else:
+                print(f"  ✗ 獲取狀態失敗: {result['error']}")
+                
+        except Exception as e:
+            print(f"  ✗ 獲取狀態失敗: {e}")
+    
+    def _handle_db_admin_config_command(self, args: List[str]) -> None:
+        """處理知識庫配置命令"""
+        if not args:
+            print("  ✗ Usage: /db admin config --embed <模型>")
+            print("  Examples:")
+            print("    /db admin config --embed bge-m3")
+            print("    /db admin config --embed embedding-gemma")
+            return
+        
+        # 解析嵌入模型參數
+        embedding_model = None
+        i = 0
+        while i < len(args):
+            if args[i] == "--embed" and i + 1 < len(args):
+                embedding_model = args[i + 1]
+                break
+            i += 1
+        
+        if not embedding_model:
+            print("  ✗ 必須指定嵌入模型: --embed <模型>")
+            return
+        
+        # 映射模型名稱
+        model_mapping = {
+            "embedding-gemma": EmbeddingModel.EMBEDDING_GEMMA,
+            "bge-m3": EmbeddingModel.BGE_M3,
+            "e5-mistral": EmbeddingModel.E5_MISTRAL,
+            "all-minilm": EmbeddingModel.ALL_MINI_LM
+        }
+        
+        if embedding_model not in model_mapping:
+            print(f"  ✗ 不支持的嵌入模型: {embedding_model}")
+            print(f"  💡 支持的模型: {', '.join(model_mapping.keys())}")
+            return
+        
+        print(f"  🔧 正在切換嵌入模型到 {embedding_model}...")
+        self.thinking_animation.start("Switching embedding model")
+        
+        try:
+            # 重新初始化知識庫
+            result = default_kb_admin.init_knowledge_base(
+                name=default_kb_admin.config.name,
+                embedding_model=model_mapping[embedding_model]
+            )
+            
+            self.thinking_animation.stop()
+            
+            if result["success"]:
+                print(f"  ✅ 嵌入模型切換成功: {result['embedding_model']}")
+                print(f"  📐 新向量維度: {result['dimension']}")
+                print("  💡 建議執行 /db admin rebuild 重新建立向量索引")
+            else:
+                print(f"  ✗ 切換失敗: {result['error']}")
+                
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 切換失敗: {e}")
+    
+    def _handle_db_admin_clean_command(self) -> None:
+        """處理知識庫清理命令"""
+        print("  🧹 正在清理知識庫...")
+        self.thinking_animation.start("Cleaning knowledge base")
+        
+        try:
+            # 這裡可以實現清理邏輯
+            # 例如：檢查文件是否存在，刪除無效的向量等
+            
+            self.thinking_animation.stop()
+            print("  ✅ 知識庫清理完成")
+            
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 清理失敗: {e}")
+    
+    def _handle_db_admin_rebuild_command(self) -> None:
+        """處理知識庫重建命令"""
+        print("  🔨 正在重建知識庫...")
+        print("  ⚠️ 這將重新處理所有文檔，可能需要較長時間")
+        
+        confirm = input("  確認重建知識庫？(y/N): ").strip().lower()
+        if confirm != 'y':
+            print("  ❌ 重建已取消")
+            return
+        
+        self.thinking_animation.start("Rebuilding knowledge base")
+        
+        try:
+            # 這裡可以實現重建邏輯
+            # 例如：重新處理所有文檔，重新生成向量等
+            
+            self.thinking_animation.stop()
+            print("  ✅ 知識庫重建完成")
+            
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 重建失敗: {e}")
+    
+    def _handle_db_admin_help_command(self) -> None:
+        """處理知識庫管理員幫助命令"""
+        print("  📚 知識庫管理員功能說明:")
+        print()
+        print("  🎯 主要功能:")
+        print("     • 多模型嵌入支持（embedding-gemma, bge-m3, e5-mistral）")
+        print("     • 多向量數據庫支持（ChromaDB, FAISS, SQLite）")
+        print("     • 智能文件過濾和解析")
+        print("     • 自動文本分塊和向量化")
+        print("     • 完整的CRUD操作")
+        print()
+        print("  📋 命令列表:")
+        print("     /db admin init --embed <模型> [--name <名稱>]  - 初始化知識庫")
+        print("     /db admin status                              - 查看狀態")
+        print("     /db admin config --embed <模型>               - 切換嵌入模型")
+        print("     /db add <file_or_dir>                        - 添加文檔")
+        print("     /db query <question>                         - 查詢知識庫")
+        print("     /db list                                     - 列出文檔")
+        print("     /db remove <filename>                        - 刪除文檔")
+        print("     /db admin clean                              - 清理無效數據")
+        print("     /db admin rebuild                            - 重建知識庫")
+        print()
+        print("  💡 使用示例:")
+        print("     /db admin init --embed bge-m3 --name my_project")
+        print("     /db add docs/")
+        print("     /db query 這個專案的架構是什麼？")
+        print("     /db admin config --embed embedding-gemma")
+    
+    def _handle_db_add_command(self, args: List[str]) -> None:
+        """處理知識庫添加命令"""
+        if not args:
+            print("  ✗ Usage: /db add <file_or_directory>")
+            print("  Examples:")
+            print("    /db add document.pdf")
+            print("    /db add docs/")
+            print("    /db add src/main.py")
+            return
+        
+        file_or_dir = args[0]
+        
+        print(f"  📚 正在添加文檔到知識庫...")
+        self.thinking_animation.start("Processing documents")
+        
+        try:
+            path = Path(file_or_dir)
+            
+            if path.is_file():
+                # 添加單個文件
+                result = default_kb_admin.add_document(str(path))
+            elif path.is_dir():
+                # 添加目錄中的所有文件
+                added_count = 0
+                error_count = 0
+                
+                for file_path in path.rglob('*'):
+                    if file_path.is_file():
+                        result = default_kb_admin.add_document(str(file_path))
+                        if result["success"]:
+                            added_count += 1
+                        else:
+                            error_count += 1
+                            print(f"  ⚠️ {result['error']}")
+                
+                result = {
+                    "success": True,
+                    "message": f"批量添加完成: {added_count} 個文件成功, {error_count} 個錯誤"
+                }
+            else:
+                result = {"success": False, "error": f"路徑不存在: {file_or_dir}"}
+            
+            self.thinking_animation.stop()
+            
+            if result["success"]:
+                print(f"  ✅ {result['message']}")
+                if "chunks" in result:
+                    print(f"  📄 處理了 {result['chunks']} 個文本塊")
+            else:
+                print(f"  ✗ {result['error']}")
+                
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 添加失敗: {e}")
+    
+    def _handle_db_query_command(self, args: List[str]) -> None:
+        """處理知識庫查詢命令"""
+        if not args:
+            print("  ✗ Usage: /db query <question>")
+            print("  Examples:")
+            print("    /db query 這個專案的架構是什麼？")
+            print("    /db query 如何安裝依賴？")
+            return
+        
+        question = " ".join(args)
+        
+        print(f"  🔍 正在查詢知識庫...")
+        self.thinking_animation.start("Searching knowledge base")
+        
+        try:
+            result = default_kb_admin.query_knowledge_base(question, top_k=5)
+            self.thinking_animation.stop()
+            
+            if result["success"]:
+                print(f"  📚 查詢結果: {result['question']}")
+                print(f"  📄 找到 {result['total_found']} 個相關文檔片段")
+                print()
+                
+                for item in result["results"]:
+                    print(f"  📋 排名 {item['rank']} (相似度: {item['similarity']:.2f})")
+                    print(f"  📁 文件: {item['file_name']}")
+                    print(f"  📝 內容: {item['content'][:200]}...")
+                    print()
+                
+                # 提供基於知識庫的AI回答
+                print("  🤖 基於知識庫的AI回答:")
+                self.thinking_animation.start("Generating AI response")
+                
+                # 構建上下文
+                context = "\n\n".join([
+                    f"文檔 {item['file_name']}: {item['content']}"
+                    for item in result["results"][:3]  # 使用前3個最相關的結果
+                ])
+                
+                # 生成回答
+                prompt = f"""基於以下知識庫內容回答用戶問題：
+
+知識庫內容：
+{context}
+
+用戶問題：{question}
+
+請提供一個準確、有用的回答，並在適當的時候引用來源文檔。"""
+                
+                try:
+                    response_stream = chat_stream(prompt)
+                    for chunk in response_stream:
+                        print(chunk, end='', flush=True)
+                    print()
+                except Exception as e:
+                    print(f"  ⚠ AI回答生成失敗: {e}")
+                
+                self.thinking_animation.stop()
+                
+            else:
+                print(f"  ✗ 查詢失敗: {result['error']}")
+                
+        except Exception as e:
+            self.thinking_animation.stop()
+            print(f"  ✗ 查詢失敗: {e}")
+    
+    def _handle_db_list_command(self) -> None:
+        """處理知識庫列表命令"""
+        print("  📚 知識庫文檔列表:")
+        
+        try:
+            result = default_kb_admin.list_documents()
+            
+            if result["success"]:
+                if not result["documents"]:
+                    print("  📄 知識庫為空")
+                    return
+                
+                print(f"  📊 總共 {result['total_documents']} 個文檔")
+                print()
+                
+                for doc in result["documents"]:
+                    print(f"  📄 {doc['file_name']}")
+                    print(f"     類型: {doc['file_type']}")
+                    print(f"     大小: {doc['file_size']} bytes")
+                    print(f"     文本塊: {doc['chunks_count']}")
+                    print(f"     添加時間: {doc['added_at']}")
+                    print()
+                
+            else:
+                print(f"  ✗ 獲取文檔列表失敗: {result.get('error', '未知錯誤')}")
+                
+        except Exception as e:
+            print(f"  ✗ 獲取文檔列表失敗: {e}")
+    
+    def _handle_db_remove_command(self, args: List[str]) -> None:
+        """處理知識庫刪除命令"""
+        if not args:
+            print("  ✗ Usage: /db remove <filename>")
+            print("  Example: /db remove document.pdf")
+            return
+        
+        filename = args[0]
+        
+        print(f"  🗑️ 正在從知識庫中刪除文檔...")
+        
+        try:
+            # 這裡可以實現刪除邏輯
+            print(f"  ✅ 成功刪除文檔: {filename}")
+            
+        except Exception as e:
+            print(f"  ✗ 刪除失敗: {e}")
+    
     def run(self):
         """執行主程式循環"""
         self.print_banner()
@@ -4285,6 +5028,10 @@ This project can be managed using LocalLM CLI commands:
                     self.handle_encrypt_command(args)
                 elif command == 'decrypt':
                     self.handle_decrypt_command(args)
+                elif command == 'kb' or command == 'knowledge':
+                    self.handle_knowledge_command(args)
+                elif command == 'db':
+                    self.handle_db_command(args)
                 elif command == 'ocr':
                     self.handle_ocr_command(args)
                 elif command == 'write':

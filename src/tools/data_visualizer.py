@@ -170,7 +170,7 @@ class DataVisualizer:
         except Exception as e:
             return {"error": f"創建圖表失敗: {str(e)}"}
     
-    def _generate_chart(self, df: pd.DataFrame, chart_type: str, 
+    def _generate_chart(self, df, chart_type: str, 
                         x_column: str = None, y_column: str = None, 
                         title: str = None) -> Dict[str, Any]:
         """生成具體的圖表"""
@@ -293,7 +293,7 @@ class DataVisualizer:
         except Exception as e:
             return {"error": f"創建互動式圖表失敗: {str(e)}"}
     
-    def _generate_interactive_chart(self, df: pd.DataFrame, chart_type: str,
+    def _generate_interactive_chart(self, df, chart_type: str,
                                    x_column: str = None, y_column: str = None,
                                    title: str = None):
         """生成互動式圖表"""
