@@ -120,37 +120,68 @@ class CommandCompleter:
     """命令自動補全器"""
     
     def __init__(self):
-        self.commands = [
-                '/help', '/read', '/write', '/create', '/list', '/tree',
-                '/mkdir', '/cd', '/mv', '/cp', '/rm', '/models', '/switch',
-                '/clear', '/bye', '/exit', '/thesis', '/analyze', '/ocr',
-                '/chart', '/chart analyze', '/chart suggest', '/chart create', '/chart batch',
-                '/visualize', '/batch', '/batch read', '/batch analyze', '/batch search', '/batch replace',
-                '/gui', '/encrypt', '/decrypt', '/encrypt backup', '/encrypt batch', '/decrypt batch',
-                '/git', '/git status', '/git add', '/git commit', '/git push',
-                '/git pull', '/git log', '/git diff', '/git analyze', '/git workflow',
-                '/git config --user', '/git config --email', '/git config --show',
-                '/kb', '/kb add', '/kb query', '/kb list', '/kb delete', '/kb stats', '/kb help',
-                '/db', '/db admin', '/db admin init', '/db admin status', '/db admin config', 
-                '/db admin clean', '/db admin rebuild', '/db admin help', '/db add', '/db query', 
-                '/db list', '/db remove'
-            ]
+        # 主要命令（優先級高）
+        self.main_commands = [
+            '/help', '/read', '/write', '/create', '/list', '/tree',
+            '/mkdir', '/cd', '/mv', '/cp', '/rm', '/models', '/switch',
+            '/clear', '/bye', '/exit', '/thesis', '/analyze', '/ocr',
+            '/chart', '/visualize', '/batch', '/gui', '/encrypt', '/decrypt',
+            '/git', '/kb', '/db'
+        ]
+        
+        # 子命令（當主命令匹配時顯示）
+        self.sub_commands = {
+            '/chart': ['analyze', 'suggest', 'create', 'batch'],
+            '/batch': ['read', 'analyze', 'search', 'replace'],
+            '/encrypt': ['backup', 'batch'],
+            '/decrypt': ['batch'],
+            '/git': ['status', 'add', 'commit', 'push', 'pull', 'log', 'diff', 'analyze', 'workflow', 'config'],
+            '/kb': ['add', 'query', 'list', 'delete', 'stats', 'help'],
+            '/db': ['admin', 'add', 'query', 'list', 'remove'],
+            '/db admin': ['init', 'status', 'config', 'clean', 'rebuild', 'help']
+        }
+        
         self.file_extensions = ['.txt', '.py', '.md', '.json', '.html', '.css', '.js',
                                '.pdf', '.docx', '.xlsx', '.xls', '.pptx', '.csv', '.sql', '.yml', '.yaml', '.toml']
     
     def complete(self, text, state):
         """補全函數"""
         if state == 0:
-            # 獲取當前目錄的文件列表
-            try:
-                files = os.listdir('.')
-                all_options = self.commands + files
-                
-                # 過濾匹配的選項
-                matches = [option for option in all_options if option.startswith(text)]
-                self.matches = matches
-            except:
-                self.matches = [cmd for cmd in self.commands if cmd.startswith(text)]
+            # 初始化匹配列表
+            self.matches = []
+            
+            # 如果輸入以 / 開頭，只補全命令
+            if text.startswith('/'):
+                # 檢查是否已經有主命令
+                parts = text.split()
+                if len(parts) == 1:
+                    # 只輸入主命令，補全主命令
+                    self.matches = [cmd for cmd in self.main_commands if cmd.startswith(text)]
+                else:
+                    # 有主命令，補全子命令
+                    main_cmd = parts[0]
+                    if main_cmd in self.sub_commands:
+                        sub_cmd_text = ' '.join(parts[1:])
+                        sub_matches = [f"{main_cmd} {sub}" for sub in self.sub_commands[main_cmd] 
+                                     if sub.startswith(sub_cmd_text)]
+                        self.matches = sub_matches
+                    else:
+                        # 沒有子命令，補全主命令
+                        self.matches = [cmd for cmd in self.main_commands if cmd.startswith(text)]
+            else:
+                # 如果沒有 / 開頭，優先補全命令，然後是文件
+                command_matches = [cmd for cmd in self.main_commands if cmd.startswith(text)]
+                if command_matches:
+                    self.matches = command_matches
+                else:
+                    # 只有在沒有命令匹配時才添加文件
+                    try:
+                        files = os.listdir('.')
+                        file_matches = [f for f in files if f.startswith(text)]
+                        # 限制文件數量，避免過多選項
+                        self.matches = file_matches[:10]  # 最多顯示10個文件
+                    except:
+                        self.matches = []
         
         try:
             return self.matches[state]
@@ -230,9 +261,9 @@ class LocalLMCLI:
         self.async_processor = AsyncFileProcessor()  # 異步處理器
         self.completer = CommandCompleter()  # 命令補全器
         
-        # 設置自動補全
-        readline.set_completer(self.completer.complete)
-        readline.parse_and_bind('tab: complete')
+        # 禁用自動補全（避免 Tab 鍵刷新問題）
+        # readline.set_completer(self.completer.complete)
+        # readline.parse_and_bind('tab: complete')
         
         # 工作區目錄管理
         self.workspace_config_file = Path.home() / ".locallm" / "workspaces.json"
@@ -865,7 +896,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             print()
             
             # 如果有查詢，進行 AI 分析
-            if query:
+            if query and content:
                 print(f"\n  🤖 論文分析結果:")
                 print("  " + "─" * 50)
                 
@@ -876,7 +907,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
 用戶問題: {query}
 
 論文內容:
-{content[:3000]}  # 限制內容長度
+{str(content)[:3000] if content else ""}  # 限制內容長度
 
 請提供專業的學術分析，包括：
 1. 論文的主要貢獻和創新點
@@ -906,7 +937,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             import traceback
             print(f"  詳細錯誤: {traceback.format_exc()}")
     
-    def _process_thesis_directory(self, directory_path: str, query: str = None) -> None:
+    def _process_thesis_directory(self, directory_path: str, query: Optional[str] = None) -> None:
         """處理論文目錄"""
         try:
             pdf_files = []
@@ -1187,7 +1218,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         except Exception as e:
             print(f"  ❌ 同步工作流程失敗: {e}")
     
-    def _handle_release_workflow(self, version: str = None) -> None:
+    def _handle_release_workflow(self, version: Optional[str] = None) -> None:
         """處理發布工作流程"""
         if not version:
             version = input("  🏷️  請輸入版本號 (如: v1.0.0): ").strip()
@@ -1895,7 +1926,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             password = args[1] if len(args) > 1 else None
             self._decrypt_file(encrypted_file, password)
     
-    def _encrypt_file(self, file_path: str, password: str = None) -> None:
+    def _encrypt_file(self, file_path: str, password: Optional[str] = None) -> None:
         """加密文件"""
         print(f"  🔐 加密文件: {file_path}")
         print("  ────────────────────────────────────────")
@@ -1927,7 +1958,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print(f"  📊 加密大小: {result['encrypted_size']} 字節")
         print(f"  🔑 密鑰已保存: {'是' if result['key_saved'] else '否'}")
     
-    def _decrypt_file(self, encrypted_file: str, password: str = None) -> None:
+    def _decrypt_file(self, encrypted_file: str, password: Optional[str] = None) -> None:
         """解密文件"""
         print(f"  🔓 解密文件: {encrypted_file}")
         print("  ────────────────────────────────────────")
@@ -1957,7 +1988,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print(f"  📁 解密文件: {result['decrypted_file']}")
         print(f"  📊 解密大小: {result['decrypted_size']} 字節")
     
-    def _encrypt_text(self, text: str, password: str = None) -> None:
+    def _encrypt_text(self, text: str, password: Optional[str] = None) -> None:
         """加密文本"""
         print(f"  🔐 加密文本")
         print("  ────────────────────────────────────────")
@@ -1988,7 +2019,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             print(f"  🧂 鹽值: {result['salt']}")
         print(f"  🔑 密鑰已保存: {'是' if result['key_saved'] else '否'}")
     
-    def _decrypt_text(self, encrypted_text: str, password: str = None) -> None:
+    def _decrypt_text(self, encrypted_text: str, password: Optional[str] = None) -> None:
         """解密文本"""
         print(f"  🔓 解密文本")
         print("  ────────────────────────────────────────")
@@ -2016,7 +2047,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print(f"  ✅ 文本解密成功!")
         print(f"  📝 解密文本: {result['decrypted_text']}")
     
-    def _create_encrypted_backup(self, file_path: str, password: str = None) -> None:
+    def _create_encrypted_backup(self, file_path: str, password: Optional[str] = None) -> None:
         """創建加密備份"""
         print(f"  💾 創建加密備份: {file_path}")
         print("  ────────────────────────────────────────")
@@ -2048,7 +2079,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print(f"  📊 備份大小: {result['encrypted_size']} 字節")
         print(f"  🕒 備份時間: {result['timestamp']}")
     
-    def _batch_encrypt_files(self, directory: str, password: str = None) -> None:
+    def _batch_encrypt_files(self, directory: str, password: Optional[str] = None) -> None:
         """批量加密文件"""
         print(f"  🔐 批量加密文件: {directory}")
         print("  ────────────────────────────────────────")
@@ -2095,7 +2126,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
             else:
                 print(f"    ❌ {file_name}: {file_result['result'].get('error', '未知錯誤')}")
     
-    def _batch_decrypt_files(self, directory: str, password: str = None) -> None:
+    def _batch_decrypt_files(self, directory: str, password: Optional[str] = None) -> None:
         """批量解密文件"""
         print(f"  🔓 批量解密文件: {directory}")
         print("  ────────────────────────────────────────")
@@ -2867,7 +2898,7 @@ TEMPLATE \"\"\"{template_content}\"\"\"
                 # 如果不存在，也返回路徑讓用戶知道
                 return file_path
         
-        return None
+        return ""
     
     def _file_exists_in_current_dir(self, file_path: str) -> bool:
         """檢查檔案是否存在於當前目錄"""
@@ -3020,17 +3051,160 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print(f"  🤖 No explicit content found, generating content...")
         self.handle_file_creation_request(file_path, message)
     
-    def handle_help_command(self) -> None:
+    def handle_help_command(self, args: Optional[List[str]] = None) -> None:
         """顯示幫助資訊"""
-        print("\n  📚 LocalLM CLI 命令說明")
-        print("  " + "─" * 40)
+        if not args:
+            # 顯示主要分類
+            print("\n  📚 LocalLM CLI 命令分類")
+            print("  " + "─" * 50)
+            print()
+            print("  🚀 快速開始:")
+            print("     • 直接說出需求: '讀取 開發問題.txt'")
+            print("     • 自然語言: '創建一個 Python 腳本'")
+            print()
+            print("  📋 主要功能分類:")
+            print("     📁 file     - 檔案操作 (/read, /write, /create, /edit, /list)")
+            print("     📊 chart    - 數據可視化 (/chart, /visualize, /batch)")
+            print("     🔧 git      - Git 集成 (/git status, /git commit, /git push)")
+            print("     📚 kb       - 知識庫 (/kb add, /kb query, /db admin)")
+            print("     🔐 encrypt  - 加密安全 (/encrypt, /decrypt)")
+            print("     🛠️ system   - 系統工具 (/mkdir, /cd, /mv, /cp, /rm)")
+            print()
+            print("  💡 使用方式:")
+            print("     /help <分類>  - 查看特定分類的詳細命令")
+            print("     /help all     - 查看所有命令")
+            print()
+            print("  🎯 常用命令:")
+            print("     /read <檔案>  /list [目錄]  /git status  /models  /clear  /exit")
+            print()
+            print("  💡 提示: 直接說出您的需求，AI 會自動理解並執行!")
+            print()
+        else:
+            # 顯示特定分類或所有命令
+            category = args[0].lower()
+            if category == "all":
+                self._show_all_commands()
+            else:
+                self._show_category_help(category)
+    
+    def _show_category_help(self, category: str) -> None:
+        """顯示特定分類的詳細幫助"""
+        if category in ["file", "檔案", "files"]:
+            print("\n  📁 檔案操作命令")
+            print("  " + "─" * 50)
+            print("     /read <檔案>    讀取檔案內容 (支援: txt,py,md,pdf,docx,xlsx,pptx,csv,sql,yml,toml)")
+            print("     /write <檔案>   寫入檔案")
+            print("     /create <檔案>  創建新檔案")
+            print("     /edit <檔案>    編輯檔案")
+            print("     /list [目錄]    列出檔案")
+            print("     /tree [目錄]    樹狀顯示")
+            print("     /thesis <pdf>   論文分析 (支援圖片、數學公式)")
+            print("     /analyze <pdf> 深度 PDF 分析 (RAG)")
+            print("     /ocr <pdf>      OCR 文字識別")
+            print()
+            
+        elif category in ["git", "版本控制"]:
+            print("\n  🔧 Git 集成命令")
+            print("  " + "─" * 50)
+            print("     /git status     顯示 Git 狀態")
+            print("     /git add [文件]  添加文件到暫存區")
+            print("     /git commit -m 'auto'  智能提交")
+            print("     /git push [remote] [branch]  推送到遠程")
+            print("     /git pull [remote] [branch]  從遠程拉取")
+            print("     /git log [數量]  顯示提交歷史")
+            print("     /git diff       顯示變更差異")
+            print("     /git analyze    分析 diff 並提供建議")
+            print("     /git tag <標籤>  創建標籤")
+            print("     /git workflow edit <檔案>  編輯已上傳檔案的完整流程")
+            print("     /git workflow sync  同步遠程變更")
+            print("     /git workflow release [版本]  發布新版本")
+            print("     /git workflow hotfix <描述>  緊急修復")
+            print("     /git config --user <username>  設定 GitHub 用戶名")
+            print("     /git config --email <email>  設定 GitHub 郵箱")
+            print("     /git config --token <token>  設定 GitHub Token")
+            print("     /git config --show  顯示當前配置")
+            print("     /git config --switch <profile>  切換配置檔案")
+            print("     /git config --logout  登出當前帳號")
+            print()
+            
+        elif category in ["kb", "知識庫", "knowledge"]:
+            print("\n  📚 知識庫命令")
+            print("  " + "─" * 50)
+            print("  📚 基礎知識庫功能:")
+            print("     /kb add <file_or_dir> [pattern]  添加文檔到知識庫")
+            print("     /kb query <question>            查詢知識庫")
+            print("     /kb list                       列出所有文檔")
+            print("     /kb delete <filename>           刪除文檔")
+            print("     /kb stats                      顯示統計信息")
+            print("     /kb help                       顯示知識庫幫助")
+            print()
+            print("  📚 知識庫管理員 (進階):")
+            print("     /db admin init --embed <模型> [--name <名稱>]  - 初始化知識庫")
+            print("     /db admin status                              - 查看狀態")
+            print("     /db admin config --embed <模型>               - 切換嵌入模型")
+            print("     /db add <file_or_dir>                        - 添加文檔")
+            print("     /db query <question>                         - 查詢知識庫")
+            print("     /db list                                     - 列出文檔")
+            print("     /db remove <filename>                        - 刪除文檔")
+            print("     /db admin clean                              - 清理無效數據")
+            print("     /db admin rebuild                            - 重建知識庫")
+            print("     /db admin help                               - 顯示管理員幫助")
+            print()
+            
+        elif category in ["chart", "數據", "可視化", "visualization"]:
+            print("\n  📊 數據可視化命令")
+            print("  " + "─" * 50)
+            print("     /chart analyze <檔案>  分析數據結構")
+            print("     /chart suggest <檔案>  建議圖表類型")
+            print("     /chart create <檔案> <類型>  創建圖表")
+            print("     /chart batch <檔案>  批量創建圖表")
+            print("     /visualize <檔案>  快速可視化")
+            print()
+            print("     /batch read <目錄> [模式]  批量讀取文件")
+            print("     /batch analyze <目錄> [模式]  批量分析文件")
+            print("     /batch search <目錄> <關鍵詞>  批量搜索文件")
+            print("     /batch replace <目錄> <舊文本> <新文本>  批量替換")
+            print()
+            
+        elif category in ["encrypt", "加密", "安全", "security"]:
+            print("\n  🔐 加密安全命令")
+            print("  " + "─" * 50)
+            print("     /encrypt <檔案> [密碼]  加密文件")
+            print("     /decrypt <加密檔案> [密碼]  解密文件")
+            print("     /encrypt backup <檔案> [密碼]  創建加密備份")
+            print("     /encrypt batch <目錄> [密碼]  批量加密")
+            print("     /decrypt batch <目錄> [密碼]  批量解密")
+            print()
+            
+        elif category in ["system", "系統", "工具", "tools"]:
+            print("\n  🛠️ 系統工具命令")
+            print("  " + "─" * 50)
+            print("     /mkdir <目錄>   創建目錄")
+            print("     /cd <目錄>     切換目錄")
+            print("     /mv <來源> <目標>  移動/重命名")
+            print("     /cp <來源> <目標>  複製檔案")
+            print("     /rm <檔案>     刪除檔案")
+            print("     /gui          啟動圖形化界面")
+            print("     /models       顯示可用模型")
+            print("     /switch <模型> 切換模型")
+            print("     /clear        清除畫面")
+            print("     /bye          清除對話歷史")
+            print("     /exit         退出程式")
+            print()
+            
+        else:
+            print(f"\n  ❌ 未知的分類: {category}")
+            print("  💡 可用的分類: file, git, kb, chart, encrypt, system")
+            print("  💡 使用 /help 查看所有分類")
+            print()
+    
+    def _show_all_commands(self) -> None:
+        """顯示所有命令"""
+        print("\n  📚 LocalLM CLI 所有命令")
+        print("  " + "─" * 50)
         print()
-        print("  🔤 自然語言命令 (推薦使用):")
-        print("     • '讀取 開發問題.txt 並總結重點'")
-        print("     • '創建一個 Python 腳本'")
-        print("     • '列出當前目錄的檔案'")
-        print("     • '分析 config.json 的內容'")
-        print()
+        
+        # 檔案操作
         print("  📁 檔案操作:")
         print("     /read <檔案>    讀取檔案內容 (支援: txt,py,md,pdf,docx,xlsx,pptx,csv,sql,yml,toml)")
         print("     /write <檔案>   寫入檔案")
@@ -3041,6 +3215,10 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("     /thesis <pdf>   論文分析 (支援圖片、數學公式)")
         print("     /analyze <pdf> 深度 PDF 分析 (RAG)")
         print("     /ocr <pdf>      OCR 文字識別")
+        print()
+        
+        # 數據可視化
+        print("  📊 數據可視化:")
         print("     /chart analyze <檔案>  分析數據結構")
         print("     /chart suggest <檔案>  建議圖表類型")
         print("     /chart create <檔案> <類型>  創建圖表")
@@ -3050,20 +3228,9 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("     /batch analyze <目錄> [模式]  批量分析文件")
         print("     /batch search <目錄> <關鍵詞>  批量搜索文件")
         print("     /batch replace <目錄> <舊文本> <新文本>  批量替換")
-        print("     /gui  啟動圖形化界面")
-        print("     /encrypt <檔案> [密碼]  加密文件")
-        print("     /decrypt <加密檔案> [密碼]  解密文件")
-        print("     /encrypt backup <檔案> [密碼]  創建加密備份")
-        print("     /encrypt batch <目錄> [密碼]  批量加密")
-        print("     /decrypt batch <目錄> [密碼]  批量解密")
         print()
-        print("  🛠️  系統操作:")
-        print("     /mkdir <目錄>   創建目錄")
-        print("     /cd <目錄>     切換目錄")
-        print("     /mv <來源> <目標>  移動/重命名")
-        print("     /cp <來源> <目標>  複製檔案")
-        print("     /rm <檔案>     刪除檔案")
-        print()
+        
+        # Git 集成
         print("  🔧 Git 集成:")
         print("     /git status     顯示 Git 狀態")
         print("     /git add [文件]  添加文件到暫存區")
@@ -3085,15 +3252,15 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("     /git config --switch <profile>  切換配置檔案")
         print("     /git config --logout  登出當前帳號")
         print()
-        print("  📚 知識庫功能:")
+        
+        # 知識庫
+        print("  📚 知識庫:")
         print("     /kb add <file_or_dir> [pattern]  添加文檔到知識庫")
         print("     /kb query <question>            查詢知識庫")
         print("     /kb list                       列出所有文檔")
         print("     /kb delete <filename>           刪除文檔")
         print("     /kb stats                      顯示統計信息")
         print("     /kb help                       顯示知識庫幫助")
-        print()
-        print("  📚 知識庫管理員 (進階):")
         print("     /db admin init --embed <模型> [--name <名稱>]  - 初始化知識庫")
         print("     /db admin status                              - 查看狀態")
         print("     /db admin config --embed <模型>               - 切換嵌入模型")
@@ -3105,14 +3272,29 @@ TEMPLATE \"\"\"{template_content}\"\"\"
         print("     /db admin rebuild                            - 重建知識庫")
         print("     /db admin help                               - 顯示管理員幫助")
         print()
-        print("  ⚙️  其他功能:")
-        print("     /models         顯示可用模型")
-        print("     /switch <模型>  切換模型")
-        print("     /clear         清除畫面")
-        print("     /bye           清除對話歷史")
-        print("     /exit          退出程式")
+        
+        # 加密安全
+        print("  🔐 加密安全:")
+        print("     /encrypt <檔案> [密碼]  加密文件")
+        print("     /decrypt <加密檔案> [密碼]  解密文件")
+        print("     /encrypt backup <檔案> [密碼]  創建加密備份")
+        print("     /encrypt batch <目錄> [密碼]  批量加密")
+        print("     /decrypt batch <目錄> [密碼]  批量解密")
         print()
-        print("  💡 提示: 直接說出您的需求，AI 會自動理解並執行!")
+        
+        # 系統工具
+        print("  🛠️ 系統工具:")
+        print("     /mkdir <目錄>   創建目錄")
+        print("     /cd <目錄>     切換目錄")
+        print("     /mv <來源> <目標>  移動/重命名")
+        print("     /cp <來源> <目標>  複製檔案")
+        print("     /rm <檔案>     刪除檔案")
+        print("     /gui          啟動圖形化界面")
+        print("     /models       顯示可用模型")
+        print("     /switch <模型> 切換模型")
+        print("     /clear        清除畫面")
+        print("     /bye          清除對話歷史")
+        print("     /exit         退出程式")
         print()
     
     def handle_clear_command(self) -> None:
@@ -4392,7 +4574,7 @@ This project can be managed using LocalLM CLI commands:
 請提供一個準確、有用的回答，並在適當的時候引用來源文檔。"""
                 
                 try:
-                    response_stream = chat_stream(prompt)
+                    response_stream = chat_stream(self.default_model, messages=[{"role": "user", "content": prompt}])
                     for chunk in response_stream:
                         print(chunk, end='', flush=True)
                     print()
@@ -4905,7 +5087,7 @@ This project can be managed using LocalLM CLI commands:
 請提供一個準確、有用的回答，並在適當的時候引用來源文檔。"""
                 
                 try:
-                    response_stream = chat_stream(prompt)
+                    response_stream = chat_stream(self.default_model, messages=[{"role": "user", "content": prompt}])
                     for chunk in response_stream:
                         print(chunk, end='', flush=True)
                     print()
@@ -5007,7 +5189,7 @@ This project can be managed using LocalLM CLI commands:
                 elif command == 'init':
                     self.handle_init_command(args)
                 elif command == 'help':
-                    self.handle_help_command()
+                    self.handle_help_command(args)
                 elif command == 'read':
                     self.handle_read_command(args)
                 elif command == 'analyze':

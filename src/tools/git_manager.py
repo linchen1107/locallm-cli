@@ -197,7 +197,7 @@ class GitManager:
         else:
             return "fix: 修復問題"
     
-    def push(self, remote: str = None, branch: str = None) -> str:
+    def push(self, remote: Optional[str] = None, branch: Optional[str] = None) -> str:
         """推送到遠程倉庫"""
         remote = remote or self.config.get("default_remote", "origin")
         branch = branch or self.config.get("default_branch", "main")
@@ -208,7 +208,7 @@ class GitManager:
         else:
             return f"❌ 推送失敗: {output}"
     
-    def pull(self, remote: str = None, branch: str = None) -> str:
+    def pull(self, remote: Optional[str] = None, branch: Optional[str] = None) -> str:
         """從遠程倉庫拉取"""
         remote = remote or self.config.get("default_remote", "origin")
         branch = branch or self.config.get("default_branch", "main")

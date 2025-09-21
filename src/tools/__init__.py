@@ -11,7 +11,11 @@ from .file_tools import (
     file_exists,
     list_files,
     get_current_path,
-    read_pdf
+    read_pdf,
+    read_csv,
+    read_yaml,
+    read_toml,
+    read_sql
 )
 
 __all__ = [
@@ -23,5 +27,9 @@ __all__ = [
     'file_exists',
     'list_files',
     'get_current_path',
-    'read_pdf'
+    'read_pdf',
+    'read_csv',
+    'read_yaml',
+    'read_toml',
+    'read_sql'
 ]
